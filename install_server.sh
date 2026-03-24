@@ -100,7 +100,15 @@ else
     exit 1
 fi
 
-SERVER_IP=$(curl -s --max-time 5 ifconfig.me 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}')
+SERVER_IP=$(curl -4 -s --max-time 5 ifconfig.me 2>/dev/null)
+if [ -z "$SERVER_IP" ]; then
+    SERVER_IP=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+fi
+if [ -z "$SERVER_IP" ]; then
+    echo "  [FAIL] No IPv4 address detected. This tool requires IPv4."
+    sudo systemctl stop ${SERVICE} 2>/dev/null || true
+    exit 1
+fi
 
 echo ""
 echo "  ╔══════════════════════════════════════╗"
