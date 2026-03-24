@@ -10,8 +10,6 @@ import asyncio
 import argparse
 import hashlib
 import logging
-import struct
-import os
 
 logger = logging.getLogger("tunnel-server")
 
@@ -28,19 +26,42 @@ SPEEDTEST_RESPONSE_HEADER = (
 
 
 def verify_auth(auth_header: str, password: str) -> bool:
-    """Verify the auth token from client."""
     expected = hashlib.sha256(password.encode()).hexdigest()[:32]
     return auth_header == expected
+
+
+async def relay(src, dst, done: asyncio.Event):
+    """Bidirectional relay: copy data from src to dst until EOF or error."""
+    try:
+        while not done.is_set():
+            try:
+                data = await asyncio.wait_for(src.read(131072), timeout=600)
+            except asyncio.TimeoutError:
+                break
+            if not data:
+                break
+            dst.write(data)
+            await dst.drain()
+    except (ConnectionResetError, ConnectionAbortedError,
+            BrokenPipeError, asyncio.CancelledError, OSError):
+        pass
+    finally:
+        done.set()
+        try:
+            if dst.can_write_eof():
+                dst.write_eof()
+        except (OSError, AttributeError):
+            pass
 
 
 async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                         password: str):
     """Handle incoming tunnel connection."""
     addr = writer.get_extra_info("peername")
-    logger.info(f"Connection from {addr}")
+    remote_writer = None
 
     try:
-        # Step 1: Read the HTTP request from client
+        # Step 1: Read the HTTP request
         request_line = await asyncio.wait_for(reader.readline(), timeout=10)
         if not request_line:
             return
@@ -48,13 +69,12 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         request_str = request_line.decode("utf-8", errors="ignore").strip()
         logger.debug(f"Request: {request_str}")
 
-        # Verify it looks like a speedtest request
         if "/speedtest/random" not in request_str:
             writer.write(b"HTTP/1.1 404 Not Found\r\n\r\n")
             await writer.drain()
             return
 
-        # Read remaining headers
+        # Read headers
         headers = {}
         while True:
             line = await asyncio.wait_for(reader.readline(), timeout=10)
@@ -64,7 +84,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 key, val = line.decode("utf-8", errors="ignore").split(":", 1)
                 headers[key.strip().lower()] = val.strip()
 
-        # Step 2: Verify auth
+        # Step 2: Auth
         auth = headers.get("x-speedtest-token", "")
         if password and not verify_auth(auth, password):
             writer.write(b"HTTP/1.1 403 Forbidden\r\n\r\n")
@@ -72,7 +92,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             logger.warning(f"Auth failed from {addr}")
             return
 
-        # Step 3: Read tunnel target from header
+        # Step 3: Target
         target = headers.get("x-speedtest-target", "")
         if not target or ":" not in target:
             writer.write(b"HTTP/1.1 400 Bad Request\r\n\r\n")
@@ -90,55 +110,35 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 timeout=10
             )
         except Exception as e:
-            logger.error(f"Failed to connect to {target_host}:{target_port}: {e}")
+            logger.error(f"Failed to connect {target_host}:{target_port}: {e}")
             writer.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
             await writer.drain()
             return
 
-        # Step 5: Send speedtest-style HTTP response (this is what DPI sees)
+        # Step 5: Send speedtest-style response
         writer.write(SPEEDTEST_RESPONSE_HEADER)
         await writer.drain()
 
-        # Step 6: Bidirectional relay with proper shutdown
+        # Step 6: Bidirectional relay
         done = asyncio.Event()
+        await asyncio.gather(
+            relay(reader, remote_writer, done),
+            relay(remote_reader, writer, done),
+        )
 
-        async def relay(src, dst, label):
-            try:
-                while not done.is_set():
-                    data = await asyncio.wait_for(src.read(65536), timeout=300)
-                    if not data:
-                        break
-                    dst.write(data)
-                    await dst.drain()
-            except (ConnectionResetError, BrokenPipeError,
-                    asyncio.CancelledError, asyncio.TimeoutError, OSError):
-                pass
-            finally:
-                done.set()
-
-        try:
-            await asyncio.gather(
-                relay(reader, remote_writer, "client->remote"),
-                relay(remote_reader, writer, "remote->client"),
-            )
-        finally:
-            for w in (remote_writer, writer):
+    except asyncio.TimeoutError:
+        logger.debug(f"Timeout: {addr}")
+    except asyncio.IncompleteReadError:
+        logger.debug(f"Incomplete read: {addr}")
+    except Exception as e:
+        logger.debug(f"Error {addr}: {e}")
+    finally:
+        for w in (remote_writer, writer):
+            if w is not None:
                 try:
                     w.close()
                 except Exception:
                     pass
-
-    except asyncio.TimeoutError:
-        logger.warning(f"Timeout from {addr}")
-    except Exception as e:
-        logger.error(f"Error handling {addr}: {e}")
-    finally:
-        try:
-            writer.close()
-            await writer.wait_closed()
-        except Exception:
-            pass
-        logger.info(f"Closed {addr}")
 
 
 async def main(port: int, password: str):
@@ -147,7 +147,7 @@ async def main(port: int, password: str):
         "0.0.0.0", port
     )
     logger.info(f"Tunnel server listening on 0.0.0.0:{port}")
-    logger.info(f"Auth: {'enabled' if password else 'DISABLED (not recommended)'}")
+    logger.info(f"Auth: {'enabled' if password else 'DISABLED'}")
     async with server:
         await server.serve_forever()
 
