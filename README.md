@@ -35,24 +35,44 @@ SSH into your VPS, paste this single line:
 curl -fsSL https://raw.githubusercontent.com/harrylyu2006/speedteset_tunnel_nyush/main/install_server.sh | bash
 ```
 
-### Client (run on your Mac / Linux)
-
-Open terminal, paste this single line:
+### Client — macOS / Linux
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/harrylyu2006/speedteset_tunnel_nyush/main/install_client.sh | bash
 ```
 
+### Client — Windows
+
+Open PowerShell and paste:
+
+```powershell
+irm https://raw.githubusercontent.com/harrylyu2006/speedteset_tunnel_nyush/main/install_client.ps1 | iex
+```
+
+Or with args (copy from server output):
+
+```powershell
+.\install_client.ps1 -Server 1.2.3.4 -Port 8080 -Password mypass
+```
+
 ### Stop tunnel
 
 ```bash
+# macOS / Linux
 ~/.speedtest-tunnel/stop.sh
+
+# Windows (PowerShell)
+~\.speedtest-tunnel\stop.ps1
 ```
 
-### Uninstall (client, server, or both)
+### Uninstall
 
 ```bash
+# macOS / Linux
 curl -fsSL https://raw.githubusercontent.com/harrylyu2006/speedteset_tunnel_nyush/main/uninstall.sh | bash
+
+# Windows (PowerShell)
+~\.speedtest-tunnel\uninstall.ps1
 ```
 
 ---
@@ -91,7 +111,8 @@ python3 client.py --server YOUR_VPS_IP --password "your-secret"
 | `server.py` | VPS | Tunnel server (disguised as Ookla speedtest) |
 | `client.py` | Local | SOCKS5 proxy client |
 | `install_server.sh` | VPS | One-line server deploy |
-| `install_client.sh` | Local | One-line client deploy |
+| `install_client.sh` | Local | One-line client deploy (macOS/Linux) |
+| `install_client.ps1` | Local | One-line client deploy (Windows) |
 | `test_local.py` | Local | Verify DPI bypass exists on your network |
 | `test_e2e.py` | Local | End-to-end functional test |
 | `uninstall.sh` | Both | Remove everything (client, server, proxy settings) |
