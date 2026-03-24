@@ -451,12 +451,59 @@ class TunManager:
         self.server_ip = server_ip
 
         if sys.platform == "win32":
-            self._start_windows(exe, socks_port)
+            self._ensure_wintun(status_cb, socks_port)
+            self._start_windows(exe, socks_port, status_cb)
         else:
             raise RuntimeError("TUN mode currently supports Windows only in GUI")
 
-    def _start_windows(self, exe, socks_port):
+    def _ensure_wintun(self, status_cb=None, socks_port=None):
+        """Download wintun.dll if missing (required by tun2socks on Windows)."""
+        tun_dir = _tun2socks_dir()
+        dll_path = os.path.join(tun_dir, "wintun.dll")
+        if os.path.exists(dll_path):
+            return
+
+        if status_cb:
+            status_cb("Downloading wintun driver...")
+
+        url = "https://www.wintun.net/builds/wintun-0.14.1.zip"
+        zip_path = os.path.join(tun_dir, "wintun.zip")
+
+        try:
+            if socks_port:
+                _download_via_socks(url, zip_path, socks_port)
+            else:
+                urllib.request.urlretrieve(url, zip_path)
+        except Exception:
+            urllib.request.urlretrieve(url, zip_path)
+
+        # Extract the right architecture dll
+        machine = platform.machine().lower()
+        if "64" in machine or machine == "amd64":
+            want = "wintun/bin/amd64/wintun.dll"
+        else:
+            want = "wintun/bin/x86/wintun.dll"
+
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            for member in zf.namelist():
+                if member.lower().replace("\\", "/") == want:
+                    data = zf.read(member)
+                    with open(dll_path, "wb") as f:
+                        f.write(data)
+                    break
+
+        os.remove(zip_path)
+
+        if not os.path.exists(dll_path):
+            raise RuntimeError(f"Could not find {want} in wintun zip")
+
+        if status_cb:
+            status_cb("Wintun driver ready")
+
+    def _start_windows(self, exe, socks_port, status_cb=None):
         # Get default gateway before we change routes
+        if status_cb:
+            status_cb("Getting default gateway...")
         try:
             result = subprocess.run(
                 ["powershell", "-Command",
@@ -464,20 +511,29 @@ class TunManager:
                 capture_output=True, text=True, timeout=10,
                 creationflags=subprocess.CREATE_NO_WINDOW)
             self.original_gateway = result.stdout.strip()
+            if status_cb:
+                status_cb(f"Gateway: {self.original_gateway}")
         except Exception:
             self.original_gateway = None
+
+        # tun2socks needs wintun.dll in its working directory
+        tun_dir = _tun2socks_dir()
+
+        if status_cb:
+            status_cb("Starting tun2socks...")
 
         # Start tun2socks
         self.proc = subprocess.Popen(
             [exe, "-device", "tun://tun0", "-proxy", f"socks5://127.0.0.1:{socks_port}"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cwd=tun_dir,
             creationflags=subprocess.CREATE_NO_WINDOW)
 
         time.sleep(3)  # Wait for TUN adapter to come up
 
         if self.proc.poll() is not None:
             stderr = self.proc.stderr.read().decode()
-            raise RuntimeError(f"tun2socks failed: {stderr}")
+            raise RuntimeError(f"tun2socks failed:\n{stderr}")
 
         # Configure TUN adapter IP
         subprocess.run(
