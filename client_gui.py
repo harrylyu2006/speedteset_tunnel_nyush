@@ -2,6 +2,7 @@
 SpeedTest Tunnel — Windows GUI Client
 Double-click to run. No terminal needed.
 Runs the SOCKS5 proxy in-process (no subprocess, no separate Python needed).
+Supports: System Proxy (PAC) and TUN mode (via tun2socks).
 """
 
 import tkinter as tk
@@ -14,6 +15,11 @@ import random
 import time
 import sys
 import os
+import subprocess
+import platform
+import urllib.request
+import zipfile
+import shutil
 
 
 # ── Tunnel client logic (imported inline to work in exe) ──
@@ -153,7 +159,7 @@ async def run_tunnel(server_host, server_port, password, local_port, stop_event)
         await srv.wait_closed()
 
 
-# ── PAC file server (for proper SOCKS5 system proxy on Windows) ──
+# ── PAC file server ──
 
 def _build_pac(socks_port):
     return f"""function FindProxyForURL(url, host) {{
@@ -170,7 +176,6 @@ def _build_pac(socks_port):
 
 
 async def run_pac_server(socks_port, pac_port, stop_event):
-    """Serve a PAC file that tells browsers to use our SOCKS5 proxy."""
     pac_content = _build_pac(socks_port)
 
     async def handle(reader, writer):
@@ -202,7 +207,7 @@ async def run_pac_server(socks_port, pac_port, stop_event):
         await srv.wait_closed()
 
 
-# ── Windows proxy via PAC (AutoConfigURL) ──
+# ── Windows proxy via PAC ──
 
 def set_proxy_pac(enable: bool, pac_port: int = 10801):
     if sys.platform != "win32":
@@ -216,7 +221,6 @@ def set_proxy_pac(enable: bool, pac_port: int = 10801):
         if enable:
             winreg.SetValueEx(key, "AutoConfigURL", 0, winreg.REG_SZ,
                               f"http://127.0.0.1:{pac_port}/proxy.pac")
-            # Disable manual proxy to avoid conflict
             winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
         else:
             try:
@@ -225,12 +229,167 @@ def set_proxy_pac(enable: bool, pac_port: int = 10801):
                 pass
             winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
         winreg.CloseKey(key)
-
         internet = ctypes.windll.wininet
-        internet.InternetSetOptionW(0, 39, 0, 0)  # SETTINGS_CHANGED
-        internet.InternetSetOptionW(0, 37, 0, 0)  # REFRESH
+        internet.InternetSetOptionW(0, 39, 0, 0)
+        internet.InternetSetOptionW(0, 37, 0, 0)
     except Exception:
         pass
+
+
+# ── TUN mode via tun2socks ──
+
+TUN2SOCKS_VERSION = "v2.5.2"
+TUN_GATEWAY = "198.18.0.1"
+TUN_ADDR = "198.18.0.2"
+TUN_DNS = "8.8.8.8"
+
+
+def _tun2socks_dir():
+    return os.path.join(os.path.expanduser("~"), ".speedtest-tunnel", "tun2socks")
+
+
+def _tun2socks_exe():
+    d = _tun2socks_dir()
+    if sys.platform == "win32":
+        return os.path.join(d, "tun2socks.exe")
+    return os.path.join(d, "tun2socks")
+
+
+def _download_tun2socks(status_cb=None):
+    """Download tun2socks binary for current platform."""
+    exe = _tun2socks_exe()
+    if os.path.exists(exe):
+        return exe
+
+    d = _tun2socks_dir()
+    os.makedirs(d, exist_ok=True)
+
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+
+    if system == "windows":
+        arch = "amd64" if "64" in machine or machine == "amd64" else "386"
+        filename = f"tun2socks-windows-{arch}.zip"
+    elif system == "darwin":
+        arch = "arm64" if machine == "arm64" else "amd64"
+        filename = f"tun2socks-darwin-{arch}.zip"
+    else:
+        arch = "amd64" if "x86_64" in machine or "amd64" in machine else "arm64"
+        filename = f"tun2socks-linux-{arch}.zip"
+
+    url = f"https://github.com/xjasonlyu/tun2socks/releases/download/{TUN2SOCKS_VERSION}/{filename}"
+
+    if status_cb:
+        status_cb("Downloading tun2socks...")
+
+    zip_path = os.path.join(d, filename)
+    urllib.request.urlretrieve(url, zip_path)
+
+    with zipfile.ZipFile(zip_path, 'r') as zf:
+        for member in zf.namelist():
+            if "tun2socks" in member.lower():
+                extracted = zf.extract(member, d)
+                # Move to standard path
+                if extracted != exe:
+                    shutil.move(extracted, exe)
+                break
+
+    os.remove(zip_path)
+
+    if sys.platform != "win32":
+        os.chmod(exe, 0o755)
+
+    return exe
+
+
+class TunManager:
+    """Manage tun2socks process and system routes."""
+
+    def __init__(self):
+        self.proc = None
+        self.original_gateway = None
+        self.server_ip = None
+
+    def start(self, socks_port: int, server_ip: str, status_cb=None):
+        exe = _download_tun2socks(status_cb)
+        self.server_ip = server_ip
+
+        if sys.platform == "win32":
+            self._start_windows(exe, socks_port)
+        else:
+            raise RuntimeError("TUN mode currently supports Windows only in GUI")
+
+    def _start_windows(self, exe, socks_port):
+        # Get default gateway before we change routes
+        try:
+            result = subprocess.run(
+                ["powershell", "-Command",
+                 "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric | Select-Object -First 1).NextHop"],
+                capture_output=True, text=True, timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW)
+            self.original_gateway = result.stdout.strip()
+        except Exception:
+            self.original_gateway = None
+
+        # Start tun2socks
+        self.proc = subprocess.Popen(
+            [exe, "-device", "tun://tun0", "-proxy", f"socks5://127.0.0.1:{socks_port}"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            creationflags=subprocess.CREATE_NO_WINDOW)
+
+        time.sleep(3)  # Wait for TUN adapter to come up
+
+        if self.proc.poll() is not None:
+            stderr = self.proc.stderr.read().decode()
+            raise RuntimeError(f"tun2socks failed: {stderr}")
+
+        # Configure TUN adapter IP
+        subprocess.run(
+            ["netsh", "interface", "ip", "set", "address",
+             "tun0", "static", TUN_ADDR, "255.255.255.0", TUN_GATEWAY],
+            capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+
+        # Route VPS IP through original gateway (prevent loop)
+        if self.original_gateway and self.server_ip:
+            subprocess.run(
+                ["route", "add", self.server_ip, "mask", "255.255.255.255", self.original_gateway],
+                capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+
+        # Route all traffic through TUN
+        subprocess.run(
+            ["route", "add", "0.0.0.0", "mask", "128.0.0.0", TUN_GATEWAY, "metric", "5"],
+            capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        subprocess.run(
+            ["route", "add", "128.0.0.0", "mask", "128.0.0.0", TUN_GATEWAY, "metric", "5"],
+            capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+
+        # Set DNS
+        subprocess.run(
+            ["netsh", "interface", "ip", "set", "dns", "tun0", "static", TUN_DNS],
+            capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+
+    def stop(self):
+        if sys.platform == "win32":
+            self._stop_windows()
+
+    def _stop_windows(self):
+        # Remove routes
+        subprocess.run(["route", "delete", "0.0.0.0", "mask", "128.0.0.0"],
+                        capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        subprocess.run(["route", "delete", "128.0.0.0", "mask", "128.0.0.0"],
+                        capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        if self.server_ip:
+            subprocess.run(["route", "delete", self.server_ip],
+                            capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+
+        # Kill tun2socks
+        if self.proc:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+            self.proc = None
 
 
 # ── GUI ──
@@ -239,16 +398,17 @@ class TunnelGUI:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("SpeedTest Tunnel")
-        self.root.geometry("380x320")
+        self.root.geometry("380x380")
         self.root.resizable(False, False)
         self.tunnel_thread = None
         self.stop_event = threading.Event()
         self.loop = None
         self.pac_port = 10801
+        self.tun_manager = TunManager()
 
         self.root.update_idletasks()
         x = (self.root.winfo_screenwidth() - 380) // 2
-        y = (self.root.winfo_screenheight() - 320) // 2
+        y = (self.root.winfo_screenheight() - 380) // 2
         self.root.geometry(f"+{x}+{y}")
 
         self._build_ui()
@@ -274,11 +434,20 @@ class TunnelGUI:
             setattr(self, var_name, var)
             ttk.Entry(row, textvariable=var, width=25).pack(side="left", fill="x", expand=True)
 
-        self.proxy_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(frame, text="Enable system proxy", variable=self.proxy_var).pack(pady=5)
+        # Proxy mode selection
+        mode_frame = ttk.LabelFrame(frame, text="Proxy Mode", padding=5)
+        mode_frame.pack(fill="x", pady=8)
+
+        self.mode_var = tk.StringVar(value="pac")
+        ttk.Radiobutton(mode_frame, text="System Proxy (browser only)",
+                        variable=self.mode_var, value="pac").pack(anchor="w")
+        ttk.Radiobutton(mode_frame, text="TUN Mode (all apps, requires admin)",
+                        variable=self.mode_var, value="tun").pack(anchor="w")
+        ttk.Radiobutton(mode_frame, text="No proxy (SOCKS5 only)",
+                        variable=self.mode_var, value="none").pack(anchor="w")
 
         btn_frame = ttk.Frame(frame)
-        btn_frame.pack(pady=10)
+        btn_frame.pack(pady=8)
         self.connect_btn = ttk.Button(btn_frame, text="Connect", command=self._connect, width=15)
         self.connect_btn.pack(side="left", padx=5)
         self.disconnect_btn = ttk.Button(btn_frame, text="Disconnect", command=self._disconnect,
@@ -297,7 +466,8 @@ class TunnelGUI:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:
             f.write(f"{self.ip_var.get()}\n{self.port_var.get()}\n"
-                    f"{self.pass_var.get()}\n{self.lport_var.get()}\n")
+                    f"{self.pass_var.get()}\n{self.lport_var.get()}\n"
+                    f"{self.mode_var.get()}\n")
 
     def _load_config(self):
         path = self._config_path()
@@ -309,12 +479,15 @@ class TunnelGUI:
                 self.port_var.set(lines[1])
                 self.pass_var.set(lines[2])
                 self.lport_var.set(lines[3])
+            if len(lines) >= 5:
+                self.mode_var.set(lines[4])
 
     def _connect(self):
         ip = self.ip_var.get().strip()
         port = self.port_var.get().strip()
         password = self.pass_var.get().strip()
         lport = self.lport_var.get().strip()
+        mode = self.mode_var.get()
 
         if not ip:
             messagebox.showerror("Error", "Server IP is required")
@@ -323,7 +496,6 @@ class TunnelGUI:
             messagebox.showerror("Error", "Password is required")
             return
 
-        # Wait for previous tunnel to fully stop
         if self.tunnel_thread and self.tunnel_thread.is_alive():
             self.stop_event.set()
             self.tunnel_thread.join(timeout=3)
@@ -348,19 +520,31 @@ class TunnelGUI:
                     stop_async.set()
 
                 async def main():
-                    await asyncio.gather(
+                    tasks = [
                         run_tunnel(ip, int(port), password, int(lport), stop_async),
-                        run_pac_server(int(lport), self.pac_port, stop_async),
                         watch_stop(),
-                    )
+                    ]
+                    if mode == "pac":
+                        tasks.append(run_pac_server(int(lport), self.pac_port, stop_async))
+                    await asyncio.gather(*tasks)
 
-                # Signal connected after brief delay
                 def signal_connected():
                     time.sleep(1.5)
-                    if not self.stop_event.is_set():
-                        if self.proxy_var.get():
+                    if self.stop_event.is_set():
+                        return
+                    try:
+                        if mode == "pac":
                             set_proxy_pac(True, self.pac_port)
-                        self.root.after(0, self._on_connected)
+                        elif mode == "tun":
+                            self.tun_manager.start(int(lport), ip,
+                                                   status_cb=lambda s: self.root.after(
+                                                       0, lambda: self.status_var.set(s)))
+                    except Exception as e:
+                        self.root.after(0, lambda: self._on_connect_fail(
+                            f"Proxy setup failed: {e}\n\nTUN mode requires running as Administrator."))
+                        self.stop_event.set()
+                        return
+                    self.root.after(0, self._on_connected)
 
                 threading.Thread(target=signal_connected, daemon=True).start()
                 self.loop.run_until_complete(main())
@@ -375,7 +559,10 @@ class TunnelGUI:
         self.tunnel_thread.start()
 
     def _on_connected(self):
-        self.status_var.set("Connected")
+        mode = self.mode_var.get()
+        label = {"pac": "Connected (System Proxy)", "tun": "Connected (TUN)",
+                 "none": "Connected (SOCKS5 only)"}
+        self.status_var.set(label.get(mode, "Connected"))
         self.status_label.config(foreground="green")
         self.disconnect_btn.config(state="normal")
 
@@ -386,13 +573,14 @@ class TunnelGUI:
         messagebox.showerror("Connection Failed", err or "Unknown error")
 
     def _disconnect(self):
-        # Restore proxy first so user isn't stuck without internet
-        set_proxy_pac(False, self.pac_port)
+        mode = self.mode_var.get()
+        if mode == "pac":
+            set_proxy_pac(False, self.pac_port)
+        elif mode == "tun":
+            self.tun_manager.stop()
 
-        # Signal tunnel to stop
         self.stop_event.set()
 
-        # Wait for tunnel thread to finish (non-blocking for UI)
         def wait_and_update():
             if self.tunnel_thread and self.tunnel_thread.is_alive():
                 self.tunnel_thread.join(timeout=3)
@@ -407,9 +595,12 @@ class TunnelGUI:
         self.disconnect_btn.config(state="disabled")
 
     def _on_close(self):
-        set_proxy_pac(False, self.pac_port)
+        mode = self.mode_var.get()
+        if mode == "pac":
+            set_proxy_pac(False, self.pac_port)
+        elif mode == "tun":
+            self.tun_manager.stop()
         self.stop_event.set()
-        # Give tunnel a moment to shut down, then force exit
         if self.tunnel_thread and self.tunnel_thread.is_alive():
             self.tunnel_thread.join(timeout=2)
         self.root.destroy()
