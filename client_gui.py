@@ -385,16 +385,30 @@ def _download_tun2socks(status_cb=None, socks_port=None):
     url = f"https://github.com/xjasonlyu/tun2socks/releases/download/{TUN2SOCKS_VERSION}/{filename}"
 
     if status_cb:
-        status_cb("Downloading tun2socks...")
+        status_cb(f"Downloading {filename}...")
+        status_cb(f"URL: {url}")
 
     zip_path = os.path.join(d, filename)
 
     if socks_port:
+        if status_cb:
+            status_cb(f"Using SOCKS5 127.0.0.1:{socks_port}")
         try:
             _download_via_socks(url, zip_path, socks_port)
-        except Exception:
-            # Fallback: direct download
-            urllib.request.urlretrieve(url, zip_path)
+            if status_cb:
+                status_cb("Download OK (via tunnel)")
+        except Exception as e:
+            if status_cb:
+                status_cb(f"Tunnel download failed: {e}")
+                status_cb("Falling back to direct download...")
+            try:
+                urllib.request.urlretrieve(url, zip_path)
+                if status_cb:
+                    status_cb("Download OK (direct)")
+            except Exception as e2:
+                if status_cb:
+                    status_cb(f"Direct download also failed: {e2}")
+                raise
     else:
         urllib.request.urlretrieve(url, zip_path)
 
@@ -511,7 +525,7 @@ class TunnelGUI:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("SpeedTest Tunnel")
-        self.root.geometry("380x380")
+        self.root.geometry("720x420")
         self.root.resizable(False, False)
         self.tunnel_thread = None
         self.stop_event = threading.Event()
@@ -520,19 +534,30 @@ class TunnelGUI:
         self.tun_manager = TunManager()
 
         self.root.update_idletasks()
-        x = (self.root.winfo_screenwidth() - 380) // 2
-        y = (self.root.winfo_screenheight() - 380) // 2
+        x = (self.root.winfo_screenwidth() - 720) // 2
+        y = (self.root.winfo_screenheight() - 420) // 2
         self.root.geometry(f"+{x}+{y}")
 
         self._build_ui()
         self._load_config()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    def _build_ui(self):
-        frame = ttk.Frame(self.root, padding=20)
-        frame.pack(fill="both", expand=True)
+    def log(self, msg):
+        """Append a line to the log panel (thread-safe)."""
+        ts = time.strftime("%H:%M:%S")
+        def _append():
+            self.log_text.config(state="normal")
+            self.log_text.insert("end", f"[{ts}] {msg}\n")
+            self.log_text.see("end")
+            self.log_text.config(state="disabled")
+        self.root.after(0, _append)
 
-        ttk.Label(frame, text="SpeedTest Tunnel", font=("", 16, "bold")).pack(pady=(0, 15))
+    def _build_ui(self):
+        # Left panel: controls
+        left = ttk.Frame(self.root, padding=15)
+        left.pack(side="left", fill="y")
+
+        ttk.Label(left, text="SpeedTest Tunnel", font=("", 14, "bold")).pack(pady=(0, 10))
 
         for label, var_name, default in [
             ("Server IP:", "ip_var", ""),
@@ -540,36 +565,44 @@ class TunnelGUI:
             ("Password:", "pass_var", ""),
             ("Local port:", "lport_var", "1080"),
         ]:
-            row = ttk.Frame(frame)
-            row.pack(fill="x", pady=3)
-            ttk.Label(row, text=label, width=12).pack(side="left")
+            row = ttk.Frame(left)
+            row.pack(fill="x", pady=2)
+            ttk.Label(row, text=label, width=11).pack(side="left")
             var = tk.StringVar(value=default)
             setattr(self, var_name, var)
-            ttk.Entry(row, textvariable=var, width=25).pack(side="left", fill="x", expand=True)
+            ttk.Entry(row, textvariable=var, width=20).pack(side="left", fill="x", expand=True)
 
-        # Proxy mode selection
-        mode_frame = ttk.LabelFrame(frame, text="Proxy Mode", padding=5)
-        mode_frame.pack(fill="x", pady=8)
-
+        mode_frame = ttk.LabelFrame(left, text="Proxy Mode", padding=4)
+        mode_frame.pack(fill="x", pady=6)
         self.mode_var = tk.StringVar(value="pac")
-        ttk.Radiobutton(mode_frame, text="System Proxy (browser only)",
-                        variable=self.mode_var, value="pac").pack(anchor="w")
-        ttk.Radiobutton(mode_frame, text="TUN Mode (all apps, requires admin)",
-                        variable=self.mode_var, value="tun").pack(anchor="w")
-        ttk.Radiobutton(mode_frame, text="No proxy (SOCKS5 only)",
-                        variable=self.mode_var, value="none").pack(anchor="w")
+        for text, val in [("System Proxy (browser)", "pac"),
+                          ("TUN Mode (all apps, admin)", "tun"),
+                          ("SOCKS5 only", "none")]:
+            ttk.Radiobutton(mode_frame, text=text, variable=self.mode_var, value=val).pack(anchor="w")
 
-        btn_frame = ttk.Frame(frame)
+        btn_frame = ttk.Frame(left)
         btn_frame.pack(pady=8)
-        self.connect_btn = ttk.Button(btn_frame, text="Connect", command=self._connect, width=15)
-        self.connect_btn.pack(side="left", padx=5)
+        self.connect_btn = ttk.Button(btn_frame, text="Connect", command=self._connect, width=13)
+        self.connect_btn.pack(side="left", padx=3)
         self.disconnect_btn = ttk.Button(btn_frame, text="Disconnect", command=self._disconnect,
-                                         width=15, state="disabled")
-        self.disconnect_btn.pack(side="left", padx=5)
+                                         width=13, state="disabled")
+        self.disconnect_btn.pack(side="left", padx=3)
 
         self.status_var = tk.StringVar(value="Disconnected")
-        self.status_label = ttk.Label(frame, textvariable=self.status_var, foreground="gray")
+        self.status_label = ttk.Label(left, textvariable=self.status_var, foreground="gray")
         self.status_label.pack()
+
+        # Right panel: log
+        right = ttk.LabelFrame(self.root, text="Log", padding=5)
+        right.pack(side="right", fill="both", expand=True, padx=(0, 10), pady=10)
+
+        self.log_text = tk.Text(right, width=38, height=22, font=("Consolas", 9),
+                                wrap="word", state="disabled", bg="#1e1e1e", fg="#cccccc",
+                                insertbackground="#cccccc")
+        scrollbar = ttk.Scrollbar(right, orient="vertical", command=self.log_text.yview)
+        self.log_text.config(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        self.log_text.pack(side="left", fill="both", expand=True)
 
     def _config_path(self):
         return os.path.join(os.path.expanduser("~"), ".speedtest-tunnel", "gui_config.txt")
@@ -620,6 +653,9 @@ class TunnelGUI:
         self.status_label.config(foreground="orange")
         self.stop_event.clear()
 
+        self.log(f"Connecting to {ip}:{port}...")
+        self.log(f"Mode: {mode}")
+
         def run():
             try:
                 self.loop = asyncio.new_event_loop()
@@ -645,16 +681,22 @@ class TunnelGUI:
                     time.sleep(1.5)
                     if self.stop_event.is_set():
                         return
+                    self.log(f"SOCKS5 proxy up on 127.0.0.1:{lport}")
                     try:
                         if mode == "pac":
+                            self.log("Setting system proxy (PAC)...")
                             set_proxy_pac(True, self.pac_port)
+                            self.log("System proxy enabled")
                         elif mode == "tun":
-                            self.tun_manager.start(int(lport), ip,
-                                                   status_cb=lambda s: self.root.after(
-                                                       0, lambda: self.status_var.set(s)))
+                            self.log("Setting up TUN mode...")
+                            self.tun_manager.start(
+                                int(lport), ip,
+                                status_cb=lambda s: self.log(s))
+                            self.log("TUN mode active")
                     except Exception as e:
+                        self.log(f"ERROR: {e}")
                         self.root.after(0, lambda: self._on_connect_fail(
-                            f"Proxy setup failed: {e}\n\nTUN mode requires running as Administrator."))
+                            f"Proxy setup failed: {e}\n\nTUN mode requires Administrator."))
                         self.stop_event.set()
                         return
                     self.root.after(0, self._on_connected)
@@ -662,6 +704,7 @@ class TunnelGUI:
                 threading.Thread(target=signal_connected, daemon=True).start()
                 self.loop.run_until_complete(main())
             except Exception as e:
+                self.log(f"ERROR: {e}")
                 if not self.stop_event.is_set():
                     self.root.after(0, lambda: self._on_connect_fail(str(e)))
             finally:
@@ -678,6 +721,7 @@ class TunnelGUI:
         self.status_var.set(label.get(mode, "Connected"))
         self.status_label.config(foreground="green")
         self.disconnect_btn.config(state="normal")
+        self.log("Ready. Go browse!")
 
     def _on_connect_fail(self, err):
         self.status_var.set("Failed")
@@ -686,11 +730,14 @@ class TunnelGUI:
         messagebox.showerror("Connection Failed", err or "Unknown error")
 
     def _disconnect(self):
+        self.log("Disconnecting...")
         mode = self.mode_var.get()
         if mode == "pac":
             set_proxy_pac(False, self.pac_port)
+            self.log("System proxy disabled")
         elif mode == "tun":
             self.tun_manager.stop()
+            self.log("TUN stopped, routes restored")
 
         self.stop_event.set()
 
@@ -706,6 +753,7 @@ class TunnelGUI:
         self.status_label.config(foreground="gray")
         self.connect_btn.config(state="normal")
         self.disconnect_btn.config(state="disabled")
+        self.log("Disconnected")
 
     def _on_close(self):
         mode = self.mode_var.get()
