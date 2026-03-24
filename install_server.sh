@@ -14,11 +14,21 @@ echo "  ║   SpeedTest Tunnel — Server Setup    ║"
 echo "  ╚══════════════════════════════════════╝"
 echo ""
 
-# Password
-printf "  Set tunnel password: "
-read -s PASSWORD
-echo ""
-if [ -z "$PASSWORD" ]; then echo "  Error: password cannot be empty"; exit 1; fi
+# Password — read from /dev/tty so it works in curl | bash
+printf "  Set tunnel password: " > /dev/tty
+read -s PASSWORD < /dev/tty
+echo "" > /dev/tty
+if [ -z "$PASSWORD" ]; then
+    echo "  Error: password cannot be empty" > /dev/tty
+    exit 1
+fi
+printf "  Confirm password: " > /dev/tty
+read -s PASSWORD2 < /dev/tty
+echo "" > /dev/tty
+if [ "$PASSWORD" != "$PASSWORD2" ]; then
+    echo "  Error: passwords do not match" > /dev/tty
+    exit 1
+fi
 
 # Python check
 command -v python3 &>/dev/null || {
@@ -48,16 +58,28 @@ sudo iptables -C INPUT -p tcp --dport ${PORT} -j ACCEPT 2>/dev/null || \
     sudo iptables -A INPUT -p tcp --dport ${PORT} -j ACCEPT 2>/dev/null || true
 echo "  [OK] Firewall configured"
 
-# systemd
+# Save password to a separate file (not embedded in systemd unit)
+sudo tee "${INSTALL_DIR}/password" > /dev/null <<< "$PASSWORD"
+sudo chmod 600 "${INSTALL_DIR}/password"
+
+# systemd — reads password from file via EnvironmentFile workaround
+# Use a wrapper script to avoid shell quoting issues
+sudo tee "${INSTALL_DIR}/start.sh" > /dev/null <<'WRAPPER'
+#!/bin/bash
+PASSWORD=$(cat /opt/speedtest-tunnel/password)
+exec /usr/bin/python3 /opt/speedtest-tunnel/server.py --port 8080 --password "$PASSWORD"
+WRAPPER
+sudo chmod 700 "${INSTALL_DIR}/start.sh"
+
 echo "  Creating systemd service..."
-sudo tee /etc/systemd/system/${SERVICE}.service > /dev/null <<EOF
+sudo tee /etc/systemd/system/${SERVICE}.service > /dev/null <<'EOF'
 [Unit]
 Description=SpeedTest Tunnel Server
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 ${INSTALL_DIR}/server.py --port ${PORT} --password "${PASSWORD}"
+ExecStart=/opt/speedtest-tunnel/start.sh
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -96,4 +118,5 @@ echo ""
 echo "  Management:"
 echo "    sudo systemctl status ${SERVICE}"
 echo "    sudo journalctl -u ${SERVICE} -f"
+echo "    Change password: sudo nano ${INSTALL_DIR}/password && sudo systemctl restart ${SERVICE}"
 echo ""

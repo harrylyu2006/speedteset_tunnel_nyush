@@ -51,9 +51,9 @@ printf "  VPS port [8080]: "
 read SERVER_PORT </dev/tty
 SERVER_PORT=${SERVER_PORT:-8080}
 
-printf "  Tunnel password: "
-read -s PASSWORD </dev/tty
-echo ""
+printf "  Tunnel password: " > /dev/tty
+read -s PASSWORD < /dev/tty
+echo "" > /dev/tty
 if [ -z "$PASSWORD" ]; then echo "  Error: password required"; exit 1; fi
 
 # Test connectivity

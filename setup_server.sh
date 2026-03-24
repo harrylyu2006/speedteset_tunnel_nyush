@@ -14,10 +14,18 @@ echo "========================================"
 echo ""
 
 # 1. Get password
-read -sp "Set tunnel password: " PASSWORD
-echo ""
+printf "Set tunnel password: " > /dev/tty
+read -s PASSWORD < /dev/tty
+echo "" > /dev/tty
 if [ -z "$PASSWORD" ]; then
     echo "Error: password cannot be empty"
+    exit 1
+fi
+printf "Confirm password: " > /dev/tty
+read -s PASSWORD2 < /dev/tty
+echo "" > /dev/tty
+if [ "$PASSWORD" != "$PASSWORD2" ]; then
+    echo "Error: passwords do not match"
     exit 1
 fi
 
@@ -55,16 +63,27 @@ sudo iptables -C INPUT -p tcp --dport ${PORT} -j ACCEPT 2>/dev/null || \
     sudo iptables -A INPUT -p tcp --dport ${PORT} -j ACCEPT 2>/dev/null || true
 echo "[OK] Firewall configured"
 
-# 5. Create systemd service
+# 5. Save password to file (avoids shell quoting issues in systemd)
+sudo tee "${INSTALL_DIR}/password" > /dev/null <<< "$PASSWORD"
+sudo chmod 600 "${INSTALL_DIR}/password"
+
+sudo tee "${INSTALL_DIR}/start.sh" > /dev/null <<'WRAPPER'
+#!/bin/bash
+PASSWORD=$(cat /opt/speedtest-tunnel/password)
+exec /usr/bin/python3 /opt/speedtest-tunnel/server.py --port 8080 --password "$PASSWORD"
+WRAPPER
+sudo chmod 700 "${INSTALL_DIR}/start.sh"
+
+# 6. Create systemd service
 echo "Creating systemd service..."
-sudo tee /etc/systemd/system/${SERVICE_NAME}.service > /dev/null <<SERVICEFILE
+sudo tee /etc/systemd/system/${SERVICE_NAME}.service > /dev/null <<'SERVICEFILE'
 [Unit]
 Description=SpeedTest Tunnel Server
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 ${INSTALL_DIR}/server.py --port ${PORT} --password "${PASSWORD}"
+ExecStart=/opt/speedtest-tunnel/start.sh
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -78,7 +97,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable ${SERVICE_NAME}
 sudo systemctl restart ${SERVICE_NAME}
 
-# 6. Verify
+# 7. Verify
 sleep 2
 if systemctl is-active --quiet ${SERVICE_NAME}; then
     echo "[OK] Service running"
@@ -87,7 +106,7 @@ else
     exit 1
 fi
 
-# 7. Get server IP
+# 8. Get server IP
 SERVER_IP=$(curl -s --max-time 5 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
 
 echo ""
