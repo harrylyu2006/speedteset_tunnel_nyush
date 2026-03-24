@@ -1,12 +1,26 @@
 #!/bin/bash
 # SpeedTest Tunnel — One-line client deploy
-# Usage: curl -fsSL https://raw.githubusercontent.com/harrylyu2006/speedteset_tunnel_nyush/main/install_client.sh | bash
+# Usage:
+#   Interactive:   curl -fsSL .../install_client.sh | bash
+#   With args:     bash install_client.sh -s IP -p PORT -k PASSWORD
 set -e
 
 REPO="https://github.com/harrylyu2006/speedteset_tunnel_nyush.git"
 DIR="$HOME/.speedtest-tunnel"
 LOCAL_PORT=1080
 OS="$(uname)"
+SERVER_IP=""
+SERVER_PORT=""
+PASSWORD=""
+
+# Parse optional arguments
+while getopts "s:p:k:" opt 2>/dev/null; do
+    case $opt in
+        s) SERVER_IP="$OPTARG" ;;
+        p) SERVER_PORT="$OPTARG" ;;
+        k) PASSWORD="$OPTARG" ;;
+    esac
+done
 
 echo ""
 echo "  ╔══════════════════════════════════════╗"
@@ -31,18 +45,24 @@ else
     }
 fi
 
-# Get server info
-printf "  VPS IP address: " > /dev/tty
-read SERVER_IP < /dev/tty
-if [ -z "$SERVER_IP" ]; then echo "  Error: IP required"; exit 1; fi
+# Prompt only for missing parameters
+if [ -z "$SERVER_IP" ]; then
+    printf "  VPS IP address: " > /dev/tty
+    read SERVER_IP < /dev/tty
+    if [ -z "$SERVER_IP" ]; then echo "  Error: IP required"; exit 1; fi
+fi
 
-printf "  VPS port [8080]: " > /dev/tty
-read SERVER_PORT < /dev/tty
+if [ -z "$SERVER_PORT" ]; then
+    printf "  VPS port [8080]: " > /dev/tty
+    read SERVER_PORT < /dev/tty
+fi
 SERVER_PORT=${SERVER_PORT:-8080}
 
-printf "  Tunnel password: " > /dev/tty
-read PASSWORD < /dev/tty
-if [ -z "$PASSWORD" ]; then echo "  Error: password required"; exit 1; fi
+if [ -z "$PASSWORD" ]; then
+    printf "  Tunnel password: " > /dev/tty
+    read PASSWORD < /dev/tty
+    if [ -z "$PASSWORD" ]; then echo "  Error: password required"; exit 1; fi
+fi
 
 # Kill existing
 pkill -f "client.py.*--port ${LOCAL_PORT}" 2>/dev/null || true
