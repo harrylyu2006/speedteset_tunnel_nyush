@@ -1,6 +1,8 @@
 # SpeedTest Tunnel
 
-Bypass campus network QoS by disguising traffic as Ookla speedtest downloads.
+**Designed for NYU Shanghai campus network.** Bypass QoS throttling by disguising traffic as Ookla speedtest downloads.
+
+> NYUSH campus network throttles regular traffic to ~30 Mbps while whitelisting Ookla speedtest requests at full speed (~150+ Mbps). This tool exploits that DPI rule to tunnel all your traffic through the speedtest whitelist.
 
 ## Important Notes
 
