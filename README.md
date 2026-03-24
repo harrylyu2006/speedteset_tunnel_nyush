@@ -2,6 +2,13 @@
 
 Bypass campus network QoS by disguising traffic as Ookla speedtest downloads.
 
+## Important Notes
+
+- **VPS required**: You need a VPS as the tunnel endpoint
+- **Port 8080**: The DPI rule matches traffic on port 8080 — server must use this port
+- **Zero dependencies**: Pure Python 3, no pip install needed
+- **HTTPS safe**: Tunnel carries raw TCP, HTTPS encryption is preserved end-to-end
+
 ## How it works
 
 Campus DPI (Deep Packet Inspection) whitelists HTTP requests matching:
@@ -99,10 +106,9 @@ curl -fsSL https://raw.githubusercontent.com/harrylyu2006/speedteset_tunnel_nyus
 
 **Client (`install_client.sh`)**:
 1. Clones repo to `~/.speedtest-tunnel/`
-2. Runs DPI bypass verification test
-3. Prompts for VPS IP and password
-4. Starts SOCKS5 proxy in background
-5. Optionally enables macOS system-wide proxy
+2. Prompts for VPS IP and password
+3. Starts SOCKS5 proxy in background
+4. Enables system-wide proxy
 
 ## Manual Usage
 
@@ -122,19 +128,14 @@ python3 client.py --server YOUR_VPS_IP --password "your-secret"
 |------|-------|------|
 | `server.py` | VPS | Tunnel server (disguised as Ookla speedtest) |
 | `client.py` | Local | SOCKS5 proxy client |
+| `client_gui.py` | Local | Windows GUI client |
 | `install_server.sh` | VPS | One-line server deploy |
 | `install_client.sh` | Local | One-line client deploy (macOS/Linux) |
 | `install_client.ps1` | Local | One-line client deploy (Windows) |
+| `build_exe.py` | Local | Build Windows EXE |
+| `uninstall.sh` | Both | Remove everything (client, server, proxy settings) |
 | `test_local.py` | Local | Verify DPI bypass exists on your network |
 | `test_e2e.py` | Local | End-to-end functional test |
-| `uninstall.sh` | Both | Remove everything (client, server, proxy settings) |
-
-## Important Notes
-
-- **VPS required**: You need a VPS as the tunnel endpoint
-- **Port 8080**: The DPI rule matches traffic on port 8080 — server must use this port
-- **Zero dependencies**: Pure Python 3, no pip install needed
-- **HTTPS safe**: Tunnel carries raw TCP, HTTPS encryption is preserved end-to-end
 
 ## Manage
 
