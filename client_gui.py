@@ -255,8 +255,8 @@ def _tun2socks_exe():
     return os.path.join(d, "tun2socks")
 
 
-def _download_tun2socks(status_cb=None):
-    """Download tun2socks binary for current platform."""
+def _download_tun2socks(status_cb=None, socks_port=None):
+    """Download tun2socks binary. Uses local SOCKS5 proxy if available."""
     exe = _tun2socks_exe()
     if os.path.exists(exe):
         return exe
@@ -280,10 +280,32 @@ def _download_tun2socks(status_cb=None):
     url = f"https://github.com/xjasonlyu/tun2socks/releases/download/{TUN2SOCKS_VERSION}/{filename}"
 
     if status_cb:
-        status_cb("Downloading tun2socks...")
+        status_cb("Downloading tun2socks (via tunnel)...")
 
     zip_path = os.path.join(d, filename)
-    urllib.request.urlretrieve(url, zip_path)
+
+    # Download through our own SOCKS5 tunnel for speed
+    if socks_port:
+        import socks as _socks
+        import socket
+        try:
+            # Try using PySocks if available
+            orig = socket.socket
+            _socks.set_default_proxy(_socks.SOCKS5, "127.0.0.1", socks_port)
+            socket.socket = _socks.socksocket
+            urllib.request.urlretrieve(url, zip_path)
+            socket.socket = orig
+        except ImportError:
+            # PySocks not available, use curl fallback
+            result = subprocess.run(
+                ["curl", "-L", "-o", zip_path, "--socks5-hostname",
+                 f"127.0.0.1:{socks_port}", "-m", "60", url],
+                capture_output=True)
+            if result.returncode != 0:
+                # Last resort: direct download
+                urllib.request.urlretrieve(url, zip_path)
+    else:
+        urllib.request.urlretrieve(url, zip_path)
 
     with zipfile.ZipFile(zip_path, 'r') as zf:
         for member in zf.namelist():
@@ -311,7 +333,7 @@ class TunManager:
         self.server_ip = None
 
     def start(self, socks_port: int, server_ip: str, status_cb=None):
-        exe = _download_tun2socks(status_cb)
+        exe = _download_tun2socks(status_cb, socks_port=socks_port)
         self.server_ip = server_ip
 
         if sys.platform == "win32":
