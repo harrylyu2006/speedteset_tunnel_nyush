@@ -145,18 +145,18 @@ async def run_tunnel(server_host, server_port, password, local_port, stop_event)
     srv = await asyncio.start_server(
         lambda r, w: _handle_socks5(r, w, server_host, server_port, password, sem),
         "127.0.0.1", local_port)
-    async with srv:
+    try:
         while not stop_event.is_set():
-            await asyncio.sleep(0.5)
-    srv.close()
-    await srv.wait_closed()
+            await asyncio.sleep(0.3)
+    finally:
+        srv.close()
+        await srv.wait_closed()
 
 
 # ── PAC file server (for proper SOCKS5 system proxy on Windows) ──
 
-async def run_pac_server(socks_port, pac_port, stop_event):
-    """Serve a PAC file that tells browsers to use our SOCKS5 proxy."""
-    pac_content = f"""function FindProxyForURL(url, host) {{
+def _build_pac(socks_port):
+    return f"""function FindProxyForURL(url, host) {{
     if (isPlainHostName(host) ||
         shExpMatch(host, "*.local") ||
         isInNet(host, "127.0.0.0", "255.0.0.0") ||
@@ -167,6 +167,11 @@ async def run_pac_server(socks_port, pac_port, stop_event):
     }}
     return "SOCKS5 127.0.0.1:{socks_port}; SOCKS 127.0.0.1:{socks_port}; DIRECT";
 }}"""
+
+
+async def run_pac_server(socks_port, pac_port, stop_event):
+    """Serve a PAC file that tells browsers to use our SOCKS5 proxy."""
+    pac_content = _build_pac(socks_port)
 
     async def handle(reader, writer):
         try:
@@ -189,10 +194,12 @@ async def run_pac_server(socks_port, pac_port, stop_event):
                 pass
 
     srv = await asyncio.start_server(handle, "127.0.0.1", pac_port)
-    async with srv:
+    try:
         while not stop_event.is_set():
-            await asyncio.sleep(0.5)
-    srv.close()
+            await asyncio.sleep(0.3)
+    finally:
+        srv.close()
+        await srv.wait_closed()
 
 
 # ── Windows proxy via PAC (AutoConfigURL) ──
@@ -316,6 +323,12 @@ class TunnelGUI:
             messagebox.showerror("Error", "Password is required")
             return
 
+        # Wait for previous tunnel to fully stop
+        if self.tunnel_thread and self.tunnel_thread.is_alive():
+            self.stop_event.set()
+            self.tunnel_thread.join(timeout=3)
+            self.tunnel_thread = None
+
         self._save_config()
         self.connect_btn.config(state="disabled")
         self.status_var.set("Connecting...")
@@ -373,8 +386,20 @@ class TunnelGUI:
         messagebox.showerror("Connection Failed", err or "Unknown error")
 
     def _disconnect(self):
-        self.stop_event.set()
+        # Restore proxy first so user isn't stuck without internet
         set_proxy_pac(False, self.pac_port)
+
+        # Signal tunnel to stop
+        self.stop_event.set()
+
+        # Wait for tunnel thread to finish (non-blocking for UI)
+        def wait_and_update():
+            if self.tunnel_thread and self.tunnel_thread.is_alive():
+                self.tunnel_thread.join(timeout=3)
+            self.tunnel_thread = None
+            self.loop = None
+
+        threading.Thread(target=wait_and_update, daemon=True).start()
 
         self.status_var.set("Disconnected")
         self.status_label.config(foreground="gray")
@@ -382,8 +407,11 @@ class TunnelGUI:
         self.disconnect_btn.config(state="disabled")
 
     def _on_close(self):
-        self._disconnect()
-        time.sleep(0.5)
+        set_proxy_pac(False, self.pac_port)
+        self.stop_event.set()
+        # Give tunnel a moment to shut down, then force exit
+        if self.tunnel_thread and self.tunnel_thread.is_alive():
+            self.tunnel_thread.join(timeout=2)
         self.root.destroy()
 
     def run(self):
