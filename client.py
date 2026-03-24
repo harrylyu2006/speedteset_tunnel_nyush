@@ -183,15 +183,31 @@ async def main(local_port: int, server_host: str, server_port: int, password: st
 
 
 if __name__ == "__main__":
+    import getpass
+
     parser = argparse.ArgumentParser(description="SpeedTest Tunnel Client (SOCKS5)")
-    parser.add_argument("--server", required=True, help="VPS IP address")
-    parser.add_argument("--server-port", type=int, default=8080)
+    parser.add_argument("--server", default=None, help="VPS IP address")
+    parser.add_argument("--server-port", type=int, default=None)
     parser.add_argument("--port", type=int, default=1080,
                         help="Local SOCKS5 proxy port")
-    parser.add_argument("--password", type=str, default="",
+    parser.add_argument("--password", type=str, default=None,
                         help="Shared secret (must match server)")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
+
+    # Interactive prompts for missing parameters
+    if not args.server:
+        args.server = input("VPS IP address: ").strip()
+        if not args.server:
+            print("Error: IP address required")
+            raise SystemExit(1)
+
+    if args.server_port is None:
+        port_input = input("VPS port [8080]: ").strip()
+        args.server_port = int(port_input) if port_input else 8080
+
+    if args.password is None:
+        args.password = getpass.getpass("Tunnel password: ")
 
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO,
