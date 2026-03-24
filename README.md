@@ -66,15 +66,15 @@ Or with args (copy from server output):
 
 ### Client — Windows EXE (GUI, no Python needed)
 
-Build on a Windows machine:
+Download `SpeedTestTunnel.exe` from [Releases](https://github.com/harrylyu2006/speedteset_tunnel_nyush/releases), double-click to run.
+
+Or build locally:
 
 ```cmd
 git clone https://github.com/harrylyu2006/speedteset_tunnel_nyush.git
 cd speedteset_tunnel_nyush
 python build_exe.py
 ```
-
-Output: `dist\SpeedTestTunnel.exe` — double-click to run, no terminal needed.
 
 ### Stop tunnel
 
