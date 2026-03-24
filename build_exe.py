@@ -19,6 +19,8 @@ def main():
         "--onefile",
         "--windowed",
         "--name", "SpeedTestTunnel",
+        "--manifest", "admin.manifest",
+        "--uac-admin",
         "client_gui.py"
     ]
     subprocess.check_call(cmd)

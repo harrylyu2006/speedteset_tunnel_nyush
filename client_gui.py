@@ -903,5 +903,30 @@ class TunnelGUI:
         self.root.mainloop()
 
 
+def _request_admin():
+    """Re-launch as admin on Windows if not already elevated."""
+    if sys.platform != "win32":
+        return
+    import ctypes
+    if ctypes.windll.shell32.IsUserAnAdmin():
+        return
+    # Re-run self as admin
+    if getattr(sys, 'frozen', False):
+        # Running as exe
+        script = sys.executable
+    else:
+        script = os.path.abspath(__file__)
+        # For .py files, run through python
+        params = f'"{script}"'
+        script = sys.executable
+
+    ctypes.windll.shell32.ShellExecuteW(
+        None, "runas", script,
+        f'"{os.path.abspath(__file__)}"' if not getattr(sys, 'frozen', False) else "",
+        None, 1)
+    sys.exit(0)
+
+
 if __name__ == "__main__":
+    _request_admin()
     TunnelGUI().run()
