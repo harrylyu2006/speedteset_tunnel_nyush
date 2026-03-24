@@ -32,12 +32,6 @@ Target website
 SSH into your VPS, paste this single line:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/harrylyu2006/speedteset_tunnel_nyush/main/setup_server.sh) <<< "$(curl -fsSL https://raw.githubusercontent.com/harrylyu2006/speedteset_tunnel_nyush/main/server.py > /tmp/server.py && echo /tmp/server.py)"
-```
-
-Or step-by-step:
-
-```bash
 curl -fsSL https://raw.githubusercontent.com/harrylyu2006/speedteset_tunnel_nyush/main/install_server.sh | bash
 ```
 
