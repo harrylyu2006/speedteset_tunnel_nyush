@@ -49,6 +49,12 @@ curl -fsSL https://raw.githubusercontent.com/harrylyu2006/speedteset_tunnel_nyus
 ~/.speedtest-tunnel/stop.sh
 ```
 
+### Uninstall (client, server, or both)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/harrylyu2006/speedteset_tunnel_nyush/main/uninstall.sh | bash
+```
+
 ---
 
 ## What the one-click scripts do
@@ -88,6 +94,7 @@ python3 client.py --server YOUR_VPS_IP --password "your-secret"
 | `install_client.sh` | Local | One-line client deploy |
 | `test_local.py` | Local | Verify DPI bypass exists on your network |
 | `test_e2e.py` | Local | End-to-end functional test |
+| `uninstall.sh` | Both | Remove everything (client, server, proxy settings) |
 
 ## Important Notes
 
