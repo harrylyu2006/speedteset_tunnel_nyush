@@ -6,7 +6,6 @@ set -e
 REPO="https://raw.githubusercontent.com/harrylyu2006/speedteset_tunnel_nyush/main"
 INSTALL_DIR="/opt/speedtest-tunnel"
 SERVICE="speedtest-tunnel"
-PORT=8080
 
 echo ""
 echo "  ╔══════════════════════════════════════╗"
@@ -14,21 +13,20 @@ echo "  ║   SpeedTest Tunnel — Server Setup    ║"
 echo "  ╚══════════════════════════════════════╝"
 echo ""
 
-# Password — read from /dev/tty so it works in curl | bash
+# Port
+printf "  Port [8080]: " > /dev/tty
+read PORT < /dev/tty
+PORT=${PORT:-8080}
+
+# Password
 printf "  Set tunnel password: " > /dev/tty
 read -s PASSWORD < /dev/tty
 echo "" > /dev/tty
-if [ -z "$PASSWORD" ]; then
-    echo "  Error: password cannot be empty" > /dev/tty
-    exit 1
-fi
+if [ -z "$PASSWORD" ]; then echo "  Error: password cannot be empty"; exit 1; fi
 printf "  Confirm password: " > /dev/tty
 read -s PASSWORD2 < /dev/tty
 echo "" > /dev/tty
-if [ "$PASSWORD" != "$PASSWORD2" ]; then
-    echo "  Error: passwords do not match" > /dev/tty
-    exit 1
-fi
+if [ "$PASSWORD" != "$PASSWORD2" ]; then echo "  Error: passwords do not match"; exit 1; fi
 
 # Python check
 command -v python3 &>/dev/null || {
@@ -41,7 +39,6 @@ command -v python3 &>/dev/null || {
 echo "  [OK] Python3 $(python3 --version 2>&1 | awk '{print $2}')"
 
 # Download server.py
-echo "  Downloading server.py..."
 sudo mkdir -p "$INSTALL_DIR"
 sudo curl -fsSL "${REPO}/server.py" -o "${INSTALL_DIR}/server.py"
 echo "  [OK] Installed to ${INSTALL_DIR}"
@@ -56,22 +53,22 @@ elif command -v firewall-cmd &>/dev/null; then
 fi
 sudo iptables -C INPUT -p tcp --dport ${PORT} -j ACCEPT 2>/dev/null || \
     sudo iptables -A INPUT -p tcp --dport ${PORT} -j ACCEPT 2>/dev/null || true
-echo "  [OK] Firewall configured"
 
-# Save password to a separate file (not embedded in systemd unit)
+# Save config
 sudo tee "${INSTALL_DIR}/password" > /dev/null <<< "$PASSWORD"
 sudo chmod 600 "${INSTALL_DIR}/password"
+sudo tee "${INSTALL_DIR}/port" > /dev/null <<< "$PORT"
 
-# systemd — reads password from file via EnvironmentFile workaround
-# Use a wrapper script to avoid shell quoting issues
+# Wrapper script (reads password and port from files)
 sudo tee "${INSTALL_DIR}/start.sh" > /dev/null <<'WRAPPER'
 #!/bin/bash
 PASSWORD=$(cat /opt/speedtest-tunnel/password)
-exec /usr/bin/python3 /opt/speedtest-tunnel/server.py --port 8080 --password "$PASSWORD"
+PORT=$(cat /opt/speedtest-tunnel/port)
+exec /usr/bin/python3 /opt/speedtest-tunnel/server.py --port "$PORT" --password "$PASSWORD"
 WRAPPER
 sudo chmod 700 "${INSTALL_DIR}/start.sh"
 
-echo "  Creating systemd service..."
+# systemd service
 sudo tee /etc/systemd/system/${SERVICE}.service > /dev/null <<'EOF'
 [Unit]
 Description=SpeedTest Tunnel Server
@@ -95,7 +92,7 @@ sudo systemctl restart ${SERVICE}
 sleep 1
 
 if systemctl is-active --quiet ${SERVICE}; then
-    echo "  [OK] Service running"
+    echo "  [OK] Service running on port ${PORT}"
 else
     echo "  [FAIL] Check: journalctl -u ${SERVICE}"
     exit 1
@@ -112,11 +109,5 @@ echo "  IP:   ${SERVER_IP}"
 echo "  Port: ${PORT}"
 echo ""
 echo "  On your local machine, run:"
-echo ""
 echo "    curl -fsSL ${REPO}/install_client.sh | bash"
-echo ""
-echo "  Management:"
-echo "    sudo systemctl status ${SERVICE}"
-echo "    sudo journalctl -u ${SERVICE} -f"
-echo "    Change password: sudo nano ${INSTALL_DIR}/password && sudo systemctl restart ${SERVICE}"
 echo ""
