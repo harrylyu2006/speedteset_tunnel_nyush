@@ -41,14 +41,14 @@ echo "  ────────────────────────
 python3 "${DIR}/test_local.py" 2>/dev/null || true
 echo "  ─────────────────────────────────────"
 
-# Get server info
+# Get server info (all reads from /dev/tty for curl|bash compatibility)
 echo ""
-printf "  VPS IP address: "
-read SERVER_IP </dev/tty
+printf "  VPS IP address: " > /dev/tty
+read SERVER_IP < /dev/tty
 if [ -z "$SERVER_IP" ]; then echo "  Error: IP required"; exit 1; fi
 
-printf "  VPS port [8080]: "
-read SERVER_PORT </dev/tty
+printf "  VPS port [8080]: " > /dev/tty
+read SERVER_PORT < /dev/tty
 SERVER_PORT=${SERVER_PORT:-8080}
 
 printf "  Tunnel password: " > /dev/tty
