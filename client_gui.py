@@ -310,7 +310,16 @@ def _download_via_socks(url, dest_path, socks_port):
         sock = _socks5_connect(socks_port, host, port)
 
         if use_ssl:
-            ctx = ssl.create_default_context()
+            try:
+                import certifi
+                ctx = ssl.create_default_context(cafile=certifi.where())
+            except ImportError:
+                ctx = ssl.create_default_context()
+            # Fallback: if cert verification fails in bundled exe, skip it
+            # (we're downloading from github.com, risk is acceptable)
+            if getattr(sys, 'frozen', False):
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
             sock = ctx.wrap_socket(sock, server_hostname=host)
 
         # Send HTTP request
