@@ -500,81 +500,136 @@ class TunManager:
         if status_cb:
             status_cb("Wintun driver ready")
 
+    def _run_cmd(self, args, status_cb=None, check=False):
+        """Run a command, log it, return (stdout, stderr, returncode)."""
+        if status_cb:
+            status_cb(f"$ {' '.join(args[:5])}")
+        r = subprocess.run(args, capture_output=True, text=True, timeout=15,
+                           creationflags=subprocess.CREATE_NO_WINDOW)
+        if r.stdout.strip() and status_cb:
+            status_cb(f"  -> {r.stdout.strip()[:100]}")
+        if r.returncode != 0 and status_cb:
+            status_cb(f"  ERR({r.returncode}): {r.stderr.strip()[:100]}")
+        if check and r.returncode != 0:
+            raise RuntimeError(f"Command failed: {' '.join(args)}\n{r.stderr}")
+        return r.stdout.strip(), r.stderr.strip(), r.returncode
+
+    def _find_tun_interface(self, status_cb=None):
+        """Find the TUN adapter name created by tun2socks."""
+        # tun2socks v2.5 creates adapter named "tun0" by default via wintun
+        # But Windows may rename it. Search for it.
+        for name_candidate in ["tun0", "tun1", "wintun"]:
+            out, _, rc = self._run_cmd(
+                ["netsh", "interface", "ip", "show", "interface", name_candidate],
+                status_cb)
+            if rc == 0:
+                return name_candidate
+
+        # Fallback: find any interface with 198.18 address
+        out, _, _ = self._run_cmd(
+            ["powershell", "-Command",
+             "Get-NetAdapter | Where-Object {$_.InterfaceDescription -like '*Wintun*'} | Select-Object -ExpandProperty Name"],
+            status_cb)
+        if out:
+            return out.split("\n")[0].strip()
+
+        return "tun0"  # Best guess
+
     def _start_windows(self, exe, socks_port, status_cb=None):
-        # Get default gateway before we change routes
+        # Get default gateway BEFORE anything changes
         if status_cb:
             status_cb("Getting default gateway...")
         try:
-            result = subprocess.run(
+            out, _, _ = self._run_cmd(
                 ["powershell", "-Command",
                  "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric | Select-Object -First 1).NextHop"],
-                capture_output=True, text=True, timeout=10,
-                creationflags=subprocess.CREATE_NO_WINDOW)
-            self.original_gateway = result.stdout.strip()
+                status_cb)
+            self.original_gateway = out
             if status_cb:
                 status_cb(f"Gateway: {self.original_gateway}")
-        except Exception:
+        except Exception as e:
+            if status_cb:
+                status_cb(f"WARNING: Could not get gateway: {e}")
             self.original_gateway = None
 
-        # tun2socks needs wintun.dll in its working directory
-        tun_dir = _tun2socks_dir()
+        if not self.original_gateway:
+            raise RuntimeError(
+                "Cannot determine default gateway.\n"
+                "TUN mode needs the original gateway to route VPS traffic directly.")
 
+        # MUST add VPS direct route BEFORE starting TUN to prevent loop
+        if status_cb:
+            status_cb(f"Adding direct route for VPS {self.server_ip}...")
+        self._run_cmd(
+            ["route", "add", self.server_ip, "mask", "255.255.255.255",
+             self.original_gateway, "metric", "1"],
+            status_cb, check=True)
+
+        # Start tun2socks
+        tun_dir = _tun2socks_dir()
         if status_cb:
             status_cb("Starting tun2socks...")
 
-        # Start tun2socks
         self.proc = subprocess.Popen(
             [exe, "-device", "tun://tun0", "-proxy", f"socks5://127.0.0.1:{socks_port}"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             cwd=tun_dir,
             creationflags=subprocess.CREATE_NO_WINDOW)
 
-        time.sleep(3)  # Wait for TUN adapter to come up
+        time.sleep(4)  # Wait for TUN adapter to come up
 
         if self.proc.poll() is not None:
             stderr = self.proc.stderr.read().decode()
+            # Clean up the VPS route we already added
+            self._run_cmd(["route", "delete", self.server_ip])
             raise RuntimeError(f"tun2socks failed:\n{stderr}")
 
+        # Find TUN adapter name
+        tun_name = self._find_tun_interface(status_cb)
+        self._tun_name = tun_name
+        if status_cb:
+            status_cb(f"TUN adapter: {tun_name}")
+
         # Configure TUN adapter IP
-        subprocess.run(
+        if status_cb:
+            status_cb("Configuring TUN adapter...")
+        self._run_cmd(
             ["netsh", "interface", "ip", "set", "address",
-             "tun0", "static", TUN_ADDR, "255.255.255.0", TUN_GATEWAY],
-            capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+             tun_name, "static", TUN_ADDR, "255.255.255.0", TUN_GATEWAY],
+            status_cb)
 
-        # Route VPS IP through original gateway (prevent loop)
-        if self.original_gateway and self.server_ip:
-            subprocess.run(
-                ["route", "add", self.server_ip, "mask", "255.255.255.255", self.original_gateway],
-                capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
-
-        # Route all traffic through TUN
-        subprocess.run(
+        # Route all traffic through TUN (split into two halves to override default)
+        if status_cb:
+            status_cb("Adding routes...")
+        self._run_cmd(
             ["route", "add", "0.0.0.0", "mask", "128.0.0.0", TUN_GATEWAY, "metric", "5"],
-            capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
-        subprocess.run(
+            status_cb)
+        self._run_cmd(
             ["route", "add", "128.0.0.0", "mask", "128.0.0.0", TUN_GATEWAY, "metric", "5"],
-            capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            status_cb)
 
-        # Set DNS
-        subprocess.run(
-            ["netsh", "interface", "ip", "set", "dns", "tun0", "static", TUN_DNS],
-            capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        # Also keep local/private networks direct
+        for cidr, mask in [("10.0.0.0", "255.0.0.0"),
+                           ("172.16.0.0", "255.240.0.0"),
+                           ("192.168.0.0", "255.255.0.0")]:
+            self._run_cmd(
+                ["route", "add", cidr, "mask", mask, self.original_gateway, "metric", "1"],
+                status_cb)
+
+        # Set DNS on TUN interface
+        if status_cb:
+            status_cb("Setting DNS...")
+        self._run_cmd(
+            ["netsh", "interface", "ip", "set", "dns", tun_name, "static", TUN_DNS],
+            status_cb)
 
     def stop(self):
         if sys.platform == "win32":
             self._stop_windows()
 
     def _stop_windows(self):
-        # Remove routes
-        subprocess.run(["route", "delete", "0.0.0.0", "mask", "128.0.0.0"],
-                        capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
-        subprocess.run(["route", "delete", "128.0.0.0", "mask", "128.0.0.0"],
-                        capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
-        if self.server_ip:
-            subprocess.run(["route", "delete", self.server_ip],
-                            capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
-
-        # Kill tun2socks
+        NW = subprocess.CREATE_NO_WINDOW
+        # Kill tun2socks first (removes TUN adapter)
         if self.proc:
             self.proc.terminate()
             try:
@@ -582,6 +637,19 @@ class TunManager:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
             self.proc = None
+
+        # Remove routes
+        subprocess.run(["route", "delete", "0.0.0.0", "mask", "128.0.0.0"],
+                        capture_output=True, creationflags=NW)
+        subprocess.run(["route", "delete", "128.0.0.0", "mask", "128.0.0.0"],
+                        capture_output=True, creationflags=NW)
+        if self.server_ip:
+            subprocess.run(["route", "delete", self.server_ip],
+                            capture_output=True, creationflags=NW)
+        # Remove private network direct routes
+        for cidr in ["10.0.0.0", "172.16.0.0", "192.168.0.0"]:
+            subprocess.run(["route", "delete", cidr],
+                            capture_output=True, creationflags=NW)
 
 
 # ── GUI ──
