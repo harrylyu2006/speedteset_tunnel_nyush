@@ -55,6 +55,18 @@ Or with args (copy from server output):
 .\install_client.ps1 -Server 1.2.3.4 -Port 8080 -Password mypass
 ```
 
+### Client — Windows EXE (GUI, no Python needed)
+
+Build on a Windows machine:
+
+```cmd
+git clone https://github.com/harrylyu2006/speedteset_tunnel_nyush.git
+cd speedteset_tunnel_nyush
+python build_exe.py
+```
+
+Output: `dist\SpeedTestTunnel.exe` — double-click to run, no terminal needed.
+
 ### Stop tunnel
 
 ```bash
