@@ -24,7 +24,7 @@ jobs:
 
       - name: Build EXE
         run: |
-          pyinstaller --onefile --windowed --name SpeedTestTunnel --add-data "client.py;." client_gui.py
+          pyinstaller --onefile --windowed --name SpeedTestTunnel client_gui.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

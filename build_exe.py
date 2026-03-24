@@ -19,7 +19,6 @@ def main():
         "--onefile",
         "--windowed",
         "--name", "SpeedTestTunnel",
-        "--add-data", f"client.py{os.pathsep}.",
         "client_gui.py"
     ]
     subprocess.check_call(cmd)

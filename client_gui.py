@@ -1,16 +1,232 @@
 """
 SpeedTest Tunnel — Windows GUI Client
 Double-click to run. No terminal needed.
+Runs the SOCKS5 proxy in-process (no subprocess, no separate Python needed).
 """
 
 import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
-import subprocess
+import asyncio
+import hashlib
+import struct
+import random
+import time
 import sys
 import os
-import signal
 
+
+# ── Tunnel client logic (imported inline to work in exe) ──
+
+SPEEDTEST_REQUEST_TEMPLATE = (
+    "GET /speedtest/random{size}x{size}.jpg?x={timestamp}.{bump} HTTP/1.1\r\n"
+    "Host: {host}\r\n"
+    "User-Agent: Mozilla/5.0 (compatible; speedtest-cli)\r\n"
+    "Cache-Control: no-cache\r\n"
+    "Connection: keep-alive\r\n"
+    "Accept: */*\r\n"
+    "X-Speedtest-Token: {auth}\r\n"
+    "X-Speedtest-Target: {target}\r\n"
+    "\r\n"
+)
+SIZES = [3000, 3500, 4000]
+
+
+def make_auth_token(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()[:32]
+
+
+async def _relay(src, dst, done: asyncio.Event):
+    try:
+        while not done.is_set():
+            try:
+                data = await asyncio.wait_for(src.read(131072), timeout=600)
+            except asyncio.TimeoutError:
+                break
+            if not data:
+                break
+            dst.write(data)
+            await dst.drain()
+    except (ConnectionResetError, ConnectionAbortedError,
+            BrokenPipeError, asyncio.CancelledError, OSError):
+        pass
+    finally:
+        done.set()
+        try:
+            if dst.can_write_eof():
+                dst.write_eof()
+        except (OSError, AttributeError):
+            pass
+
+
+async def _handle_socks5(reader, writer, server_host, server_port, password, sem):
+    remote_writer = None
+    async with sem:
+        try:
+            header = await asyncio.wait_for(reader.readexactly(2), timeout=10)
+            ver, nmethods = struct.unpack("!BB", header)
+            if ver != 5:
+                return
+            await reader.readexactly(nmethods)
+            writer.write(struct.pack("!BB", 5, 0))
+            await writer.drain()
+
+            req_header = await asyncio.wait_for(reader.readexactly(4), timeout=10)
+            ver, cmd, _, atyp = struct.unpack("!BBBB", req_header)
+            if cmd != 1:
+                writer.write(struct.pack("!BBBBIH", 5, 7, 0, 1, 0, 0))
+                await writer.drain()
+                return
+
+            if atyp == 1:
+                raw = await reader.readexactly(4)
+                host = ".".join(str(b) for b in raw)
+            elif atyp == 3:
+                dlen = (await reader.readexactly(1))[0]
+                host = (await reader.readexactly(dlen)).decode()
+            elif atyp == 4:
+                raw = await reader.readexactly(16)
+                host = ":".join(f"{raw[i]:02x}{raw[i+1]:02x}" for i in range(0, 16, 2))
+            else:
+                writer.write(struct.pack("!BBBBIH", 5, 8, 0, 1, 0, 0))
+                await writer.drain()
+                return
+
+            port = struct.unpack("!H", await reader.readexactly(2))[0]
+
+            for attempt in range(2):
+                try:
+                    rr, remote_writer = await asyncio.wait_for(
+                        asyncio.open_connection(server_host, server_port), timeout=10)
+                    break
+                except Exception:
+                    if attempt == 1:
+                        writer.write(struct.pack("!BBBBIH", 5, 5, 0, 1, 0, 0))
+                        await writer.drain()
+                        return
+                    await asyncio.sleep(0.5)
+
+            req = SPEEDTEST_REQUEST_TEMPLATE.format(
+                size=random.choice(SIZES), timestamp=int(time.time() * 1000),
+                bump=random.randint(0, 99), host=server_host,
+                auth=make_auth_token(password), target=f"{host}:{port}")
+            remote_writer.write(req.encode())
+            await remote_writer.drain()
+
+            while True:
+                line = await asyncio.wait_for(rr.readline(), timeout=10)
+                if line in (b"\r\n", b"\n", b""):
+                    break
+                resp = line.decode("utf-8", errors="ignore").strip()
+                if resp.startswith("HTTP/") and "200" not in resp:
+                    writer.write(struct.pack("!BBBBIH", 5, 5, 0, 1, 0, 0))
+                    await writer.drain()
+                    return
+
+            writer.write(struct.pack("!BBBBIH", 5, 0, 0, 1, 0, 0))
+            await writer.drain()
+
+            done = asyncio.Event()
+            await asyncio.gather(_relay(reader, remote_writer, done),
+                                 _relay(rr, writer, done))
+        except (asyncio.TimeoutError, asyncio.IncompleteReadError, Exception):
+            pass
+        finally:
+            for w in (remote_writer, writer):
+                if w:
+                    try:
+                        w.close()
+                    except Exception:
+                        pass
+
+
+async def run_tunnel(server_host, server_port, password, local_port, stop_event):
+    sem = asyncio.Semaphore(256)
+    srv = await asyncio.start_server(
+        lambda r, w: _handle_socks5(r, w, server_host, server_port, password, sem),
+        "127.0.0.1", local_port)
+    async with srv:
+        while not stop_event.is_set():
+            await asyncio.sleep(0.5)
+    srv.close()
+    await srv.wait_closed()
+
+
+# ── PAC file server (for proper SOCKS5 system proxy on Windows) ──
+
+async def run_pac_server(socks_port, pac_port, stop_event):
+    """Serve a PAC file that tells browsers to use our SOCKS5 proxy."""
+    pac_content = f"""function FindProxyForURL(url, host) {{
+    if (isPlainHostName(host) ||
+        shExpMatch(host, "*.local") ||
+        isInNet(host, "127.0.0.0", "255.0.0.0") ||
+        isInNet(host, "10.0.0.0", "255.0.0.0") ||
+        isInNet(host, "172.16.0.0", "255.240.0.0") ||
+        isInNet(host, "192.168.0.0", "255.255.0.0")) {{
+        return "DIRECT";
+    }}
+    return "SOCKS5 127.0.0.1:{socks_port}; SOCKS 127.0.0.1:{socks_port}; DIRECT";
+}}"""
+
+    async def handle(reader, writer):
+        try:
+            await asyncio.wait_for(reader.read(4096), timeout=5)
+            resp = (
+                f"HTTP/1.1 200 OK\r\n"
+                f"Content-Type: application/x-ns-proxy-autoconfig\r\n"
+                f"Content-Length: {len(pac_content)}\r\n"
+                f"Connection: close\r\n\r\n"
+                f"{pac_content}"
+            )
+            writer.write(resp.encode())
+            await writer.drain()
+        except Exception:
+            pass
+        finally:
+            try:
+                writer.close()
+            except Exception:
+                pass
+
+    srv = await asyncio.start_server(handle, "127.0.0.1", pac_port)
+    async with srv:
+        while not stop_event.is_set():
+            await asyncio.sleep(0.5)
+    srv.close()
+
+
+# ── Windows proxy via PAC (AutoConfigURL) ──
+
+def set_proxy_pac(enable: bool, pac_port: int = 10801):
+    if sys.platform != "win32":
+        return
+    try:
+        import winreg
+        import ctypes
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                             r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+                             0, winreg.KEY_WRITE)
+        if enable:
+            winreg.SetValueEx(key, "AutoConfigURL", 0, winreg.REG_SZ,
+                              f"http://127.0.0.1:{pac_port}/proxy.pac")
+            # Disable manual proxy to avoid conflict
+            winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
+        else:
+            try:
+                winreg.DeleteValue(key, "AutoConfigURL")
+            except FileNotFoundError:
+                pass
+            winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
+        winreg.CloseKey(key)
+
+        internet = ctypes.windll.wininet
+        internet.InternetSetOptionW(0, 39, 0, 0)  # SETTINGS_CHANGED
+        internet.InternetSetOptionW(0, 37, 0, 0)  # REFRESH
+    except Exception:
+        pass
+
+
+# ── GUI ──
 
 class TunnelGUI:
     def __init__(self):
@@ -18,9 +234,11 @@ class TunnelGUI:
         self.root.title("SpeedTest Tunnel")
         self.root.geometry("380x320")
         self.root.resizable(False, False)
-        self.proc = None
+        self.tunnel_thread = None
+        self.stop_event = threading.Event()
+        self.loop = None
+        self.pac_port = 10801
 
-        # Center window
         self.root.update_idletasks()
         x = (self.root.winfo_screenwidth() - 380) // 2
         y = (self.root.winfo_screenheight() - 320) // 2
@@ -36,47 +254,30 @@ class TunnelGUI:
 
         ttk.Label(frame, text="SpeedTest Tunnel", font=("", 16, "bold")).pack(pady=(0, 15))
 
-        # Server IP
-        row1 = ttk.Frame(frame)
-        row1.pack(fill="x", pady=3)
-        ttk.Label(row1, text="Server IP:", width=12).pack(side="left")
-        self.ip_var = tk.StringVar()
-        ttk.Entry(row1, textvariable=self.ip_var, width=25).pack(side="left", fill="x", expand=True)
+        for label, var_name, default in [
+            ("Server IP:", "ip_var", ""),
+            ("Port:", "port_var", "8080"),
+            ("Password:", "pass_var", ""),
+            ("Local port:", "lport_var", "1080"),
+        ]:
+            row = ttk.Frame(frame)
+            row.pack(fill="x", pady=3)
+            ttk.Label(row, text=label, width=12).pack(side="left")
+            var = tk.StringVar(value=default)
+            setattr(self, var_name, var)
+            ttk.Entry(row, textvariable=var, width=25).pack(side="left", fill="x", expand=True)
 
-        # Port
-        row2 = ttk.Frame(frame)
-        row2.pack(fill="x", pady=3)
-        ttk.Label(row2, text="Port:", width=12).pack(side="left")
-        self.port_var = tk.StringVar(value="8080")
-        ttk.Entry(row2, textvariable=self.port_var, width=25).pack(side="left", fill="x", expand=True)
-
-        # Password
-        row3 = ttk.Frame(frame)
-        row3.pack(fill="x", pady=3)
-        ttk.Label(row3, text="Password:", width=12).pack(side="left")
-        self.pass_var = tk.StringVar()
-        ttk.Entry(row3, textvariable=self.pass_var, width=25).pack(side="left", fill="x", expand=True)
-
-        # Local port
-        row4 = ttk.Frame(frame)
-        row4.pack(fill="x", pady=3)
-        ttk.Label(row4, text="Local port:", width=12).pack(side="left")
-        self.lport_var = tk.StringVar(value="1080")
-        ttk.Entry(row4, textvariable=self.lport_var, width=25).pack(side="left", fill="x", expand=True)
-
-        # System proxy checkbox
         self.proxy_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(frame, text="Enable system proxy", variable=self.proxy_var).pack(pady=5)
 
-        # Buttons
         btn_frame = ttk.Frame(frame)
         btn_frame.pack(pady=10)
         self.connect_btn = ttk.Button(btn_frame, text="Connect", command=self._connect, width=15)
         self.connect_btn.pack(side="left", padx=5)
-        self.disconnect_btn = ttk.Button(btn_frame, text="Disconnect", command=self._disconnect, width=15, state="disabled")
+        self.disconnect_btn = ttk.Button(btn_frame, text="Disconnect", command=self._disconnect,
+                                         width=15, state="disabled")
         self.disconnect_btn.pack(side="left", padx=5)
 
-        # Status
         self.status_var = tk.StringVar(value="Disconnected")
         self.status_label = ttk.Label(frame, textvariable=self.status_var, foreground="gray")
         self.status_label.pack()
@@ -88,7 +289,8 @@ class TunnelGUI:
         path = self._config_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:
-            f.write(f"{self.ip_var.get()}\n{self.port_var.get()}\n{self.pass_var.get()}\n{self.lport_var.get()}\n")
+            f.write(f"{self.ip_var.get()}\n{self.port_var.get()}\n"
+                    f"{self.pass_var.get()}\n{self.lport_var.get()}\n")
 
     def _load_config(self):
         path = self._config_path()
@@ -100,33 +302,6 @@ class TunnelGUI:
                 self.port_var.set(lines[1])
                 self.pass_var.set(lines[2])
                 self.lport_var.set(lines[3])
-
-    def _set_proxy(self, enable: bool):
-        """Set Windows system SOCKS proxy via registry."""
-        if sys.platform != "win32":
-            return
-        try:
-            import winreg
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                                r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-                                0, winreg.KEY_WRITE)
-            if enable:
-                local_port = self.lport_var.get()
-                winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, f"socks=127.0.0.1:{local_port}")
-                winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
-                winreg.SetValueEx(key, "ProxyOverride", 0, winreg.REG_SZ,
-                                  "localhost;127.*;10.*;192.168.*;<local>")
-            else:
-                winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
-            winreg.CloseKey(key)
-
-            # Notify Windows
-            import ctypes
-            internet = ctypes.windll.wininet
-            internet.InternetSetOptionW(0, 39, 0, 0)
-            internet.InternetSetOptionW(0, 37, 0, 0)
-        except Exception:
-            pass
 
     def _connect(self):
         ip = self.ip_var.get().strip()
@@ -145,44 +320,46 @@ class TunnelGUI:
         self.connect_btn.config(state="disabled")
         self.status_var.set("Connecting...")
         self.status_label.config(foreground="orange")
+        self.stop_event.clear()
 
         def run():
             try:
-                # Find client.py
-                if getattr(sys, 'frozen', False):
-                    # Running as exe: client.py is bundled
-                    base = sys._MEIPASS
-                else:
-                    base = os.path.dirname(os.path.abspath(__file__))
-                client_py = os.path.join(base, "client.py")
+                self.loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(self.loop)
 
-                self.proc = subprocess.Popen(
-                    [sys.executable, client_py,
-                     "--server", ip,
-                     "--server-port", port,
-                     "--port", lport,
-                     "--password", password],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                )
+                stop_async = asyncio.Event()
 
-                # Wait a moment to check if it crashes
-                import time
-                time.sleep(2)
-                if self.proc.poll() is not None:
-                    stderr = self.proc.stderr.read().decode()
-                    self.root.after(0, lambda: self._on_connect_fail(stderr))
-                    return
+                async def watch_stop():
+                    while not self.stop_event.is_set():
+                        await asyncio.sleep(0.3)
+                    stop_async.set()
 
-                # Enable proxy
-                if self.proxy_var.get():
-                    self._set_proxy(True)
+                async def main():
+                    await asyncio.gather(
+                        run_tunnel(ip, int(port), password, int(lport), stop_async),
+                        run_pac_server(int(lport), self.pac_port, stop_async),
+                        watch_stop(),
+                    )
 
-                self.root.after(0, self._on_connected)
+                # Signal connected after brief delay
+                def signal_connected():
+                    time.sleep(1.5)
+                    if not self.stop_event.is_set():
+                        if self.proxy_var.get():
+                            set_proxy_pac(True, self.pac_port)
+                        self.root.after(0, self._on_connected)
+
+                threading.Thread(target=signal_connected, daemon=True).start()
+                self.loop.run_until_complete(main())
             except Exception as e:
-                self.root.after(0, lambda: self._on_connect_fail(str(e)))
+                if not self.stop_event.is_set():
+                    self.root.after(0, lambda: self._on_connect_fail(str(e)))
+            finally:
+                if self.loop:
+                    self.loop.close()
 
-        threading.Thread(target=run, daemon=True).start()
+        self.tunnel_thread = threading.Thread(target=run, daemon=True)
+        self.tunnel_thread.start()
 
     def _on_connected(self):
         self.status_var.set("Connected")
@@ -196,16 +373,8 @@ class TunnelGUI:
         messagebox.showerror("Connection Failed", err or "Unknown error")
 
     def _disconnect(self):
-        if self.proc:
-            self.proc.terminate()
-            try:
-                self.proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
-            self.proc = None
-
-        if self.proxy_var.get():
-            self._set_proxy(False)
+        self.stop_event.set()
+        set_proxy_pac(False, self.pac_port)
 
         self.status_var.set("Disconnected")
         self.status_label.config(foreground="gray")
@@ -214,6 +383,7 @@ class TunnelGUI:
 
     def _on_close(self):
         self._disconnect()
+        time.sleep(0.5)
         self.root.destroy()
 
     def run(self):

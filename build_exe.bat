@@ -15,8 +15,6 @@ pyinstaller ^
     --onefile ^
     --windowed ^
     --name SpeedTestTunnel ^
-    --add-data "client.py;." ^
-    --icon NUL ^
     client_gui.py
 
 echo.
