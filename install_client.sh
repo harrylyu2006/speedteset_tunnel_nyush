@@ -107,13 +107,42 @@ else
     echo "  [WARN] Test returned HTTP ${RESULT} (tunnel may still work)"
 fi
 
-# Create stop script
+# Enable system proxy automatically on macOS
+PROXY_ENABLED=""
+if [[ "$(uname)" == "Darwin" ]]; then
+    # Find active network interface
+    IFACE=""
+    for candidate in "Wi-Fi" "Ethernet" "USB 10/100/1000 LAN"; do
+        STATUS=$(networksetup -getinfo "$candidate" 2>/dev/null | grep "^IP address:" | awk '{print $3}')
+        if [ -n "$STATUS" ] && [ "$STATUS" != "none" ]; then
+            IFACE="$candidate"
+            break
+        fi
+    done
+
+    if [ -n "$IFACE" ]; then
+        echo "  Enabling system proxy on ${IFACE}..."
+        networksetup -setsocksfirewallproxy "$IFACE" 127.0.0.1 ${LOCAL_PORT}
+        networksetup -setsocksfirewallproxystate "$IFACE" on
+        # Bypass proxy for local addresses
+        networksetup -setproxybypassdomains "$IFACE" \
+            "*.local" "169.254/16" "127.0.0.1" "localhost" "10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16" \
+            2>/dev/null || true
+        PROXY_ENABLED="$IFACE"
+        echo "  [OK] System proxy enabled — all traffic now goes through tunnel"
+    else
+        echo "  [WARN] Could not detect active network interface"
+        echo "  Set SOCKS5 proxy manually: 127.0.0.1:${LOCAL_PORT}"
+    fi
+fi
+
+# Create stop script (also disables system proxy)
 cat > "${DIR}/stop.sh" <<'STOPSCRIPT'
 #!/bin/bash
 echo "Stopping SpeedTest Tunnel..."
 pkill -f "client.py.*--server" 2>/dev/null && echo "[OK] Client stopped" || echo "Not running"
 if [[ "$(uname)" == "Darwin" ]]; then
-    for IFACE in "Wi-Fi" "Ethernet"; do
+    for IFACE in "Wi-Fi" "Ethernet" "USB 10/100/1000 LAN"; do
         STATE=$(networksetup -getsocksfirewallproxy "$IFACE" 2>/dev/null | grep "^Enabled" | awk '{print $2}')
         if [ "$STATE" = "Yes" ]; then
             networksetup -setsocksfirewallproxystate "$IFACE" off
@@ -125,32 +154,19 @@ echo "Done."
 STOPSCRIPT
 chmod +x "${DIR}/stop.sh"
 
-# Proxy setup
+# Done
 echo ""
 echo "  ╔══════════════════════════════════════╗"
 echo "  ║         Tunnel is ready!             ║"
 echo "  ╚══════════════════════════════════════╝"
 echo ""
-echo "  SOCKS5 proxy: 127.0.0.1:${LOCAL_PORT}"
+echo "  SOCKS5 proxy:  127.0.0.1:${LOCAL_PORT}"
+if [ -n "$PROXY_ENABLED" ]; then
+echo "  System proxy:  ON (${PROXY_ENABLED})"
 echo ""
-
-if [[ "$(uname)" == "Darwin" ]]; then
-    echo "  Enable system proxy? (routes ALL traffic through tunnel)"
-    printf "  [y/N]: "
-    read ENABLE </dev/tty
-    if [[ "$ENABLE" =~ ^[Yy]$ ]]; then
-        IFACE=$(networksetup -listallnetworkservices 2>/dev/null | grep -E "Wi-Fi|Ethernet" | head -1)
-        if [ -n "$IFACE" ]; then
-            networksetup -setsocksfirewallproxy "$IFACE" 127.0.0.1 ${LOCAL_PORT}
-            networksetup -setsocksfirewallproxystate "$IFACE" on
-            echo "  [OK] System proxy enabled on ${IFACE}"
-        fi
-    fi
-    echo ""
+echo "  All apps now use the tunnel. Open a browser and enjoy!"
 fi
-
-echo "  Usage:"
-echo "    Stop:    ~/.speedtest-tunnel/stop.sh"
-echo "    Log:     tail -f /tmp/speedtest-tunnel-client.log"
-echo "    Test:    curl --socks5-hostname 127.0.0.1:${LOCAL_PORT} -o /dev/null -w '%{speed_download}' https://speed.cloudflare.com/__down?bytes=10000000"
+echo ""
+echo "  Stop tunnel & restore proxy:"
+echo "    ~/.speedtest-tunnel/stop.sh"
 echo ""
