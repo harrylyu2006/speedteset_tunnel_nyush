@@ -255,8 +255,113 @@ def _tun2socks_exe():
     return os.path.join(d, "tun2socks")
 
 
+def _socks5_connect(proxy_port, dest_host, dest_port):
+    """Pure-Python SOCKS5 connect through our tunnel. No dependencies."""
+    import socket as _socket
+    s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    s.settimeout(30)
+    s.connect(("127.0.0.1", proxy_port))
+    # SOCKS5 handshake
+    s.sendall(b"\x05\x01\x00")
+    resp = s.recv(2)
+    if resp != b"\x05\x00":
+        s.close()
+        raise RuntimeError("SOCKS5 handshake failed")
+    # SOCKS5 connect request (domain)
+    host_bytes = dest_host.encode()
+    s.sendall(b"\x05\x01\x00\x03" + bytes([len(host_bytes)]) + host_bytes +
+              struct.pack("!H", dest_port))
+    resp = s.recv(10)
+    if len(resp) < 2 or resp[1] != 0:
+        s.close()
+        raise RuntimeError(f"SOCKS5 connect failed: {resp}")
+    return s
+
+
+def _download_via_socks(url, dest_path, socks_port):
+    """Download a URL through SOCKS5 proxy using pure Python."""
+    import ssl
+    import socket as _socket
+
+    # Parse URL — handle redirects manually
+    max_redirects = 5
+    for _ in range(max_redirects):
+        # Parse
+        if url.startswith("https://"):
+            host_path = url[8:]
+            port = 443
+            use_ssl = True
+        else:
+            host_path = url[7:]
+            port = 80
+            use_ssl = False
+
+        slash = host_path.find("/")
+        if slash == -1:
+            host, path = host_path, "/"
+        else:
+            host, path = host_path[:slash], host_path[slash:]
+
+        if ":" in host:
+            host, port = host.rsplit(":", 1)
+            port = int(port)
+
+        # Connect through SOCKS5
+        sock = _socks5_connect(socks_port, host, port)
+
+        if use_ssl:
+            ctx = ssl.create_default_context()
+            sock = ctx.wrap_socket(sock, server_hostname=host)
+
+        # Send HTTP request
+        req = f"GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nUser-Agent: speedtest-tunnel\r\n\r\n"
+        sock.sendall(req.encode())
+
+        # Read response header
+        header_data = b""
+        while b"\r\n\r\n" not in header_data:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            header_data += chunk
+
+        header_end = header_data.index(b"\r\n\r\n")
+        header_str = header_data[:header_end].decode("utf-8", errors="ignore")
+        body_start = header_data[header_end + 4:]
+
+        status_line = header_str.split("\r\n")[0]
+        status_code = int(status_line.split()[1])
+
+        # Handle redirect
+        if status_code in (301, 302, 303, 307, 308):
+            for line in header_str.split("\r\n"):
+                if line.lower().startswith("location:"):
+                    url = line.split(":", 1)[1].strip()
+                    break
+            sock.close()
+            continue
+
+        if status_code != 200:
+            sock.close()
+            raise RuntimeError(f"HTTP {status_code}: {status_line}")
+
+        # Download body
+        with open(dest_path, "wb") as f:
+            if body_start:
+                f.write(body_start)
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                f.write(chunk)
+        sock.close()
+        return
+
+    raise RuntimeError("Too many redirects")
+
+
 def _download_tun2socks(status_cb=None, socks_port=None):
-    """Download tun2socks binary. Uses local SOCKS5 proxy if available."""
+    """Download tun2socks binary. Routes through tunnel if available."""
     exe = _tun2socks_exe()
     if os.path.exists(exe):
         return exe
@@ -280,30 +385,16 @@ def _download_tun2socks(status_cb=None, socks_port=None):
     url = f"https://github.com/xjasonlyu/tun2socks/releases/download/{TUN2SOCKS_VERSION}/{filename}"
 
     if status_cb:
-        status_cb("Downloading tun2socks (via tunnel)...")
+        status_cb("Downloading tun2socks...")
 
     zip_path = os.path.join(d, filename)
 
-    # Download through our own SOCKS5 tunnel for speed
     if socks_port:
-        import socks as _socks
-        import socket
         try:
-            # Try using PySocks if available
-            orig = socket.socket
-            _socks.set_default_proxy(_socks.SOCKS5, "127.0.0.1", socks_port)
-            socket.socket = _socks.socksocket
+            _download_via_socks(url, zip_path, socks_port)
+        except Exception:
+            # Fallback: direct download
             urllib.request.urlretrieve(url, zip_path)
-            socket.socket = orig
-        except ImportError:
-            # PySocks not available, use curl fallback
-            result = subprocess.run(
-                ["curl", "-L", "-o", zip_path, "--socks5-hostname",
-                 f"127.0.0.1:{socks_port}", "-m", "60", url],
-                capture_output=True)
-            if result.returncode != 0:
-                # Last resort: direct download
-                urllib.request.urlretrieve(url, zip_path)
     else:
         urllib.request.urlretrieve(url, zip_path)
 
