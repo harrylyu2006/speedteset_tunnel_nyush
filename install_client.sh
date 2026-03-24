@@ -40,8 +40,7 @@ read SERVER_PORT < /dev/tty
 SERVER_PORT=${SERVER_PORT:-8080}
 
 printf "  Tunnel password: " > /dev/tty
-read -s PASSWORD < /dev/tty
-echo "" > /dev/tty
+read PASSWORD < /dev/tty
 if [ -z "$PASSWORD" ]; then echo "  Error: password required"; exit 1; fi
 
 # Kill existing

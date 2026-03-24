@@ -21,15 +21,14 @@ printf "  Port [8080]: " > /dev/tty
 read PORT < /dev/tty
 PORT=${PORT:-8080}
 
-# Password
-printf "  Set tunnel password: " > /dev/tty
-read -s PASSWORD < /dev/tty
-echo "" > /dev/tty
-if [ -z "$PASSWORD" ]; then echo "  Error: password cannot be empty"; exit 1; fi
-printf "  Confirm password: " > /dev/tty
-read -s PASSWORD2 < /dev/tty
-echo "" > /dev/tty
-if [ "$PASSWORD" != "$PASSWORD2" ]; then echo "  Error: passwords do not match"; exit 1; fi
+# Password (enter for random)
+RANDOM_PW=$(head -c 16 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 12)
+printf "  Password [press Enter for random]: " > /dev/tty
+read PASSWORD < /dev/tty
+if [ -z "$PASSWORD" ]; then
+    PASSWORD="$RANDOM_PW"
+    echo "  Generated: ${PASSWORD}"
+fi
 
 # Python check
 command -v python3 &>/dev/null || {
@@ -108,8 +107,9 @@ echo "  ╔═══════════════════════
 echo "  ║          Server is ready!            ║"
 echo "  ╚══════════════════════════════════════╝"
 echo ""
-echo "  IP:   ${SERVER_IP}"
-echo "  Port: ${PORT}"
+echo "  IP:       ${SERVER_IP}"
+echo "  Port:     ${PORT}"
+echo "  Password: ${PASSWORD}"
 echo ""
 echo "  On your local machine, run:"
 echo "    curl -fsSL ${REPO}/install_client.sh | bash"
