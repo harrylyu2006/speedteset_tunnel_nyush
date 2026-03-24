@@ -3,6 +3,9 @@
 # Usage: curl -fsSL https://raw.githubusercontent.com/harrylyu2006/speedteset_tunnel_nyush/main/install_server.sh | bash
 set -e
 
+# Suppress "unable to resolve host" warnings from sudo
+sudo() { command sudo "$@" 2>/dev/null; }
+
 REPO="https://raw.githubusercontent.com/harrylyu2006/speedteset_tunnel_nyush/main"
 INSTALL_DIR="/opt/speedtest-tunnel"
 SERVICE="speedtest-tunnel"
