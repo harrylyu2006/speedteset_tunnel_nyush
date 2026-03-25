@@ -58,17 +58,17 @@ Download `SpeedTestTunnel.exe` from [Releases](https://github.com/harrylyu2006/s
 
 Two proxy modes:
 - **System Proxy** — auto-configures Windows proxy, works for browsers
-- **SOCKS5 only** — use with [SocksCap64](https://www.sockscap64.com/) for any app (see below)
+- **SOCKS5 only** — use with [SocksCap64](https://github.com/nicedayzhu/SocksCap64) for any app (see below)
 
 ---
 
 ## Using SocksCap64 for all apps (Windows)
 
-System Proxy mode only covers browsers. To route **any app** (games, Steam, Discord, etc.) through the tunnel, use [SocksCap64](https://www.sockscap64.com/):
+System Proxy mode only covers browsers. To route **any app** (games, Steam, Discord, etc.) through the tunnel, use [SocksCap64](https://github.com/nicedayzhu/SocksCap64):
 
 ### Setup
 
-1. Download and install [SocksCap64](https://www.sockscap64.com/sockscap-64-free-download/)
+1. Download and install [SocksCap64](https://github.com/nicedayzhu/SocksCap64/releases)
 2. Open SocksCap64, click the **gear icon** (settings) in the top right
 3. Set the proxy:
    - **Proxy address**: `127.0.0.1`
