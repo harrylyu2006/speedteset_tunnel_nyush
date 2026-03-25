@@ -15,11 +15,6 @@ import random
 import time
 import sys
 import os
-import subprocess
-import platform
-import urllib.request
-import zipfile
-import shutil
 
 
 # ── Tunnel client logic (imported inline to work in exe) ──
@@ -236,516 +231,29 @@ def set_proxy_pac(enable: bool, pac_port: int = 10801):
         pass
 
 
-# ── TUN mode via tun2socks ──
-
-TUN2SOCKS_VERSION = "v2.5.2"
-TUN_GATEWAY = "198.18.0.1"
-TUN_ADDR = "198.18.0.2"
-TUN_DNS = "8.8.8.8"
-
-
-def _tun2socks_dir():
-    return os.path.join(os.path.expanduser("~"), ".speedtest-tunnel", "tun2socks")
-
-
-def _tun2socks_exe():
-    d = _tun2socks_dir()
-    if sys.platform == "win32":
-        return os.path.join(d, "tun2socks.exe")
-    return os.path.join(d, "tun2socks")
-
-
-def _socks5_connect(proxy_port, dest_host, dest_port):
-    """Pure-Python SOCKS5 connect through our tunnel. No dependencies."""
-    import socket as _socket
-    s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-    s.settimeout(30)
-    s.connect(("127.0.0.1", proxy_port))
-    # SOCKS5 handshake
-    s.sendall(b"\x05\x01\x00")
-    resp = s.recv(2)
-    if resp != b"\x05\x00":
-        s.close()
-        raise RuntimeError("SOCKS5 handshake failed")
-    # SOCKS5 connect request (domain)
-    host_bytes = dest_host.encode()
-    s.sendall(b"\x05\x01\x00\x03" + bytes([len(host_bytes)]) + host_bytes +
-              struct.pack("!H", dest_port))
-    resp = s.recv(10)
-    if len(resp) < 2 or resp[1] != 0:
-        s.close()
-        raise RuntimeError(f"SOCKS5 connect failed: {resp}")
-    return s
-
-
-def _download_via_socks(url, dest_path, socks_port):
-    """Download a URL through SOCKS5 proxy using pure Python."""
-    import ssl
-    import socket as _socket
-
-    # Parse URL — handle redirects manually
-    max_redirects = 5
-    for _ in range(max_redirects):
-        # Parse
-        if url.startswith("https://"):
-            host_path = url[8:]
-            port = 443
-            use_ssl = True
-        else:
-            host_path = url[7:]
-            port = 80
-            use_ssl = False
-
-        slash = host_path.find("/")
-        if slash == -1:
-            host, path = host_path, "/"
-        else:
-            host, path = host_path[:slash], host_path[slash:]
-
-        if ":" in host:
-            host, port = host.rsplit(":", 1)
-            port = int(port)
-
-        # Connect through SOCKS5
-        sock = _socks5_connect(socks_port, host, port)
-
-        if use_ssl:
-            try:
-                import certifi
-                ctx = ssl.create_default_context(cafile=certifi.where())
-            except ImportError:
-                ctx = ssl.create_default_context()
-            # Fallback: if cert verification fails in bundled exe, skip it
-            # (we're downloading from github.com, risk is acceptable)
-            if getattr(sys, 'frozen', False):
-                ctx.check_hostname = False
-                ctx.verify_mode = ssl.CERT_NONE
-            sock = ctx.wrap_socket(sock, server_hostname=host)
-
-        # Send HTTP request
-        req = f"GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nUser-Agent: speedtest-tunnel\r\n\r\n"
-        sock.sendall(req.encode())
-
-        # Read response header
-        header_data = b""
-        while b"\r\n\r\n" not in header_data:
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            header_data += chunk
-
-        header_end = header_data.index(b"\r\n\r\n")
-        header_str = header_data[:header_end].decode("utf-8", errors="ignore")
-        body_start = header_data[header_end + 4:]
-
-        status_line = header_str.split("\r\n")[0]
-        status_code = int(status_line.split()[1])
-
-        # Handle redirect
-        if status_code in (301, 302, 303, 307, 308):
-            for line in header_str.split("\r\n"):
-                if line.lower().startswith("location:"):
-                    url = line.split(":", 1)[1].strip()
-                    break
-            sock.close()
-            continue
-
-        if status_code != 200:
-            sock.close()
-            raise RuntimeError(f"HTTP {status_code}: {status_line}")
-
-        # Download body
-        with open(dest_path, "wb") as f:
-            if body_start:
-                f.write(body_start)
-            while True:
-                chunk = sock.recv(65536)
-                if not chunk:
-                    break
-                f.write(chunk)
-        sock.close()
-        return
-
-    raise RuntimeError("Too many redirects")
-
-
-def _download_tun2socks(status_cb=None, socks_port=None):
-    """Download tun2socks binary. Routes through tunnel if available."""
-    exe = _tun2socks_exe()
-    if os.path.exists(exe):
-        return exe
-
-    d = _tun2socks_dir()
-    os.makedirs(d, exist_ok=True)
-
-    system = platform.system().lower()
-    machine = platform.machine().lower()
-
-    if system == "windows":
-        arch = "amd64" if "64" in machine or machine == "amd64" else "386"
-        filename = f"tun2socks-windows-{arch}.zip"
-    elif system == "darwin":
-        arch = "arm64" if machine == "arm64" else "amd64"
-        filename = f"tun2socks-darwin-{arch}.zip"
-    else:
-        arch = "amd64" if "x86_64" in machine or "amd64" in machine else "arm64"
-        filename = f"tun2socks-linux-{arch}.zip"
-
-    url = f"https://github.com/xjasonlyu/tun2socks/releases/download/{TUN2SOCKS_VERSION}/{filename}"
-
-    if status_cb:
-        status_cb(f"Downloading {filename}...")
-        status_cb(f"URL: {url}")
-
-    zip_path = os.path.join(d, filename)
-
-    if socks_port:
-        if status_cb:
-            status_cb(f"Using SOCKS5 127.0.0.1:{socks_port}")
-        try:
-            _download_via_socks(url, zip_path, socks_port)
-            if status_cb:
-                status_cb("Download OK (via tunnel)")
-        except Exception as e:
-            if status_cb:
-                status_cb(f"Tunnel download failed: {e}")
-                status_cb("Falling back to direct download...")
-            try:
-                urllib.request.urlretrieve(url, zip_path)
-                if status_cb:
-                    status_cb("Download OK (direct)")
-            except Exception as e2:
-                if status_cb:
-                    status_cb(f"Direct download also failed: {e2}")
-                raise
-    else:
-        urllib.request.urlretrieve(url, zip_path)
-
-    with zipfile.ZipFile(zip_path, 'r') as zf:
-        for member in zf.namelist():
-            if "tun2socks" in member.lower():
-                extracted = zf.extract(member, d)
-                # Move to standard path
-                if extracted != exe:
-                    shutil.move(extracted, exe)
-                break
-
-    os.remove(zip_path)
-
-    if sys.platform != "win32":
-        os.chmod(exe, 0o755)
-
-    return exe
-
-
-class TunManager:
-    """Manage tun2socks process and system routes."""
-
-    def __init__(self):
-        self.proc = None
-        self.original_gateway = None
-        self.server_ip = None
-
-    def start(self, socks_port: int, server_ip: str, status_cb=None):
-        exe = _download_tun2socks(status_cb, socks_port=socks_port)
-        self.server_ip = server_ip
-
-        if sys.platform == "win32":
-            self._ensure_wintun(status_cb, socks_port)
-            self._start_windows(exe, socks_port, status_cb)
-        else:
-            raise RuntimeError("TUN mode currently supports Windows only in GUI")
-
-    def _ensure_wintun(self, status_cb=None, socks_port=None):
-        """Download wintun.dll if missing (required by tun2socks on Windows)."""
-        tun_dir = _tun2socks_dir()
-        dll_path = os.path.join(tun_dir, "wintun.dll")
-        if os.path.exists(dll_path):
-            return
-
-        if status_cb:
-            status_cb("Downloading wintun driver...")
-
-        url = "https://www.wintun.net/builds/wintun-0.14.1.zip"
-        zip_path = os.path.join(tun_dir, "wintun.zip")
-
-        try:
-            if socks_port:
-                _download_via_socks(url, zip_path, socks_port)
-            else:
-                urllib.request.urlretrieve(url, zip_path)
-        except Exception:
-            urllib.request.urlretrieve(url, zip_path)
-
-        # Extract the right architecture dll
-        machine = platform.machine().lower()
-        if "64" in machine or machine == "amd64":
-            want = "wintun/bin/amd64/wintun.dll"
-        else:
-            want = "wintun/bin/x86/wintun.dll"
-
-        with zipfile.ZipFile(zip_path, 'r') as zf:
-            for member in zf.namelist():
-                if member.lower().replace("\\", "/") == want:
-                    data = zf.read(member)
-                    with open(dll_path, "wb") as f:
-                        f.write(data)
-                    break
-
-        os.remove(zip_path)
-
-        if not os.path.exists(dll_path):
-            raise RuntimeError(f"Could not find {want} in wintun zip")
-
-        if status_cb:
-            status_cb("Wintun driver ready")
-
-    def _run_cmd(self, args, status_cb=None, check=False):
-        """Run a command, log it, return (stdout, stderr, returncode)."""
-        cmd_str = ' '.join(args)
-        if status_cb:
-            status_cb(f"$ {cmd_str}")
-        try:
-            r = subprocess.run(args, capture_output=True, text=True, timeout=15,
-                               creationflags=subprocess.CREATE_NO_WINDOW)
-        except Exception as e:
-            if status_cb:
-                status_cb(f"  CMD ERROR: {e}")
-            if check:
-                raise RuntimeError(f"Command failed: {cmd_str}\n{e}")
-            return "", str(e), 1
-        stdout = (r.stdout or "").strip()
-        stderr = (r.stderr or "").strip()
-        if stdout and status_cb:
-            status_cb(f"  -> {stdout[:200]}")
-        if stderr and status_cb:
-            status_cb(f"  stderr: {stderr[:200]}")
-        if r.returncode != 0 and status_cb:
-            status_cb(f"  EXIT CODE: {r.returncode}")
-        if check and r.returncode != 0:
-            raise RuntimeError(f"Command failed: {cmd_str}\n{stderr}")
-        return stdout, stderr, r.returncode
-
-    def _find_tun_interface(self, status_cb=None):
-        """Find the TUN adapter name created by tun2socks."""
-        # tun2socks v2.5 creates adapter named "tun0" by default via wintun
-        # But Windows may rename it. Search for it.
-        for name_candidate in ["tun0", "tun1", "wintun"]:
-            out, _, rc = self._run_cmd(
-                ["netsh", "interface", "ip", "show", "interface", name_candidate],
-                status_cb)
-            if rc == 0:
-                return name_candidate
-
-        # Fallback: find any interface with 198.18 address
-        out, _, _ = self._run_cmd(
-            ["powershell", "-Command",
-             "Get-NetAdapter | Where-Object {$_.InterfaceDescription -like '*Wintun*'} | Select-Object -ExpandProperty Name"],
-            status_cb)
-        if out:
-            return out.split("\n")[0].strip()
-
-        return "tun0"  # Best guess
-
-    def _start_windows(self, exe, socks_port, status_cb=None):
-        # Get default gateway BEFORE anything changes
-        if status_cb:
-            status_cb("Getting default gateway...")
-        try:
-            out, _, _ = self._run_cmd(
-                ["powershell", "-Command",
-                 "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric | Select-Object -First 1).NextHop"],
-                status_cb)
-            self.original_gateway = out
-            if status_cb:
-                status_cb(f"Gateway: {self.original_gateway}")
-        except Exception as e:
-            if status_cb:
-                status_cb(f"WARNING: Could not get gateway: {e}")
-            self.original_gateway = None
-
-        if not self.original_gateway:
-            raise RuntimeError(
-                "Cannot determine default gateway.\n"
-                "TUN mode needs the original gateway to route VPS traffic directly.")
-
-        # Get physical interface index for the default route
-        if status_cb:
-            status_cb("Getting physical interface index...")
-        phys_if_out, _, _ = self._run_cmd(
-            ["powershell", "-Command",
-             "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric | "
-             "Select-Object -First 1).InterfaceIndex"],
-            status_cb)
-        self._phys_if = phys_if_out.strip() if phys_if_out.strip().isdigit() else None
-        if status_cb:
-            status_cb(f"Physical IF index: {self._phys_if}")
-
-        # MUST add VPS direct route BEFORE starting TUN, bound to physical interface
-        if status_cb:
-            status_cb(f"Adding direct route for VPS {self.server_ip}...")
-        route_cmd = ["route", "add", self.server_ip, "mask", "255.255.255.255",
-                     self.original_gateway, "metric", "1"]
-        if self._phys_if:
-            route_cmd.extend(["if", self._phys_if])
-        self._run_cmd(route_cmd, status_cb, check=True)
-
-        # Start tun2socks
-        tun_dir = _tun2socks_dir()
-        if status_cb:
-            status_cb("Starting tun2socks...")
-
-        self.proc = subprocess.Popen(
-            [exe, "-device", "tun://tun0", "-proxy", f"socks5://127.0.0.1:{socks_port}"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            cwd=tun_dir,
-            creationflags=subprocess.CREATE_NO_WINDOW)
-
-        time.sleep(4)  # Wait for TUN adapter to come up
-
-        if self.proc.poll() is not None:
-            stderr = self.proc.stderr.read().decode()
-            self._run_cmd(["route", "delete", self.server_ip])
-            raise RuntimeError(f"tun2socks failed:\n{stderr}")
-
-        # Find TUN adapter name
-        tun_name = self._find_tun_interface(status_cb)
-        self._tun_name = tun_name
-        if status_cb:
-            status_cb(f"TUN adapter: {tun_name}")
-
-        # Configure TUN adapter IP — try multiple methods
-        if status_cb:
-            status_cb("Configuring TUN adapter IP...")
-
-        ip_set = False
-
-        # Method 1: PowerShell New-NetIPAddress (most reliable for Wintun)
-        if status_cb:
-            status_cb("Trying PowerShell New-NetIPAddress...")
-        # First remove any existing IP to avoid conflict
-        self._run_cmd(
-            ["powershell", "-Command",
-             f"Remove-NetIPAddress -InterfaceAlias '{tun_name}' -Confirm:$false -ErrorAction SilentlyContinue; "
-             f"Remove-NetRoute -InterfaceAlias '{tun_name}' -Confirm:$false -ErrorAction SilentlyContinue"],
-            status_cb)
-        out, err, rc = self._run_cmd(
-            ["powershell", "-Command",
-             f"New-NetIPAddress -InterfaceAlias '{tun_name}' -IPAddress {TUN_ADDR} "
-             f"-PrefixLength 24 -DefaultGateway {TUN_GATEWAY} -PolicyStore ActiveStore"],
-            status_cb)
-        if rc == 0:
-            ip_set = True
-            if status_cb:
-                status_cb(f"IP {TUN_ADDR} + gateway {TUN_GATEWAY} set via PowerShell")
-
-        # Method 2: netsh
-        if not ip_set:
-            if status_cb:
-                status_cb("Trying netsh...")
-            out, err, rc = self._run_cmd(
-                ["netsh", "interface", "ip", "set", "address",
-                 tun_name, "static", TUN_ADDR, "255.255.255.0", TUN_GATEWAY],
-                status_cb)
-            if rc == 0:
-                ip_set = True
-
-        # Verify
-        time.sleep(1)
-        out, _, _ = self._run_cmd(
-            ["powershell", "-Command",
-             f"Get-NetIPAddress -InterfaceAlias '{tun_name}' -ErrorAction SilentlyContinue | "
-             "Select-Object -ExpandProperty IPAddress"],
-            status_cb)
-        if TUN_ADDR in out:
-            if status_cb:
-                status_cb(f"Verified: {tun_name} has IP {TUN_ADDR}")
-        else:
-            if status_cb:
-                status_cb(f"WARNING: IP verification failed (got: {out})")
-                status_cb("Continuing anyway — routes may still work...")
-
-        # Get TUN interface index for route commands
-        if status_cb:
-            status_cb("Getting TUN interface index...")
-        idx_out, _, _ = self._run_cmd(
-            ["powershell", "-Command",
-             f"(Get-NetAdapter -Name '{tun_name}' -ErrorAction SilentlyContinue).ifIndex"],
-            status_cb)
-        tun_if = idx_out.strip() if idx_out.strip().isdigit() else None
-
-        # Route all traffic through TUN
-        if status_cb:
-            status_cb("Adding routes through TUN...")
-        if tun_if:
-            # Use interface index for precise routing
-            self._run_cmd(
-                ["route", "add", "0.0.0.0", "mask", "128.0.0.0", TUN_GATEWAY, "metric", "5",
-                 "if", tun_if],
-                status_cb)
-            self._run_cmd(
-                ["route", "add", "128.0.0.0", "mask", "128.0.0.0", TUN_GATEWAY, "metric", "5",
-                 "if", tun_if],
-                status_cb)
-        else:
-            self._run_cmd(
-                ["route", "add", "0.0.0.0", "mask", "128.0.0.0", TUN_GATEWAY, "metric", "5"],
-                status_cb)
-            self._run_cmd(
-                ["route", "add", "128.0.0.0", "mask", "128.0.0.0", TUN_GATEWAY, "metric", "5"],
-                status_cb)
-
-        # Keep local/private networks direct through original gateway
-        if status_cb:
-            status_cb("Adding LAN direct routes...")
-        for cidr, mask in [("10.0.0.0", "255.0.0.0"),
-                           ("172.16.0.0", "255.240.0.0"),
-                           ("192.168.0.0", "255.255.0.0")]:
-            lan_cmd = ["route", "add", cidr, "mask", mask, self.original_gateway, "metric", "1"]
-            if self._phys_if:
-                lan_cmd.extend(["if", self._phys_if])
-            self._run_cmd(lan_cmd, status_cb)
-
-        # Set DNS on TUN interface
-        if status_cb:
-            status_cb("Setting DNS...")
-        self._run_cmd(
-            ["netsh", "interface", "ip", "set", "dns",
-             f"name={tun_name}", "source=static", f"addr={TUN_DNS}"],
-            status_cb)
-
-        # Verify routes
-        if status_cb:
-            status_cb("Verifying routing table...")
-        self._run_cmd(["route", "print", "0.0.0.0"], status_cb)
-
-    def stop(self):
-        if sys.platform == "win32":
-            self._stop_windows()
-
-    def _stop_windows(self):
-        NW = subprocess.CREATE_NO_WINDOW
-        # Kill tun2socks first (removes TUN adapter)
-        if self.proc:
-            self.proc.terminate()
-            try:
-                self.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
-            self.proc = None
-
-        # Remove routes
-        subprocess.run(["route", "delete", "0.0.0.0", "mask", "128.0.0.0"],
-                        capture_output=True, creationflags=NW)
-        subprocess.run(["route", "delete", "128.0.0.0", "mask", "128.0.0.0"],
-                        capture_output=True, creationflags=NW)
-        if self.server_ip:
-            subprocess.run(["route", "delete", self.server_ip],
-                            capture_output=True, creationflags=NW)
-        # Remove private network direct routes
-        for cidr in ["10.0.0.0", "172.16.0.0", "192.168.0.0"]:
-            subprocess.run(["route", "delete", cidr],
-                            capture_output=True, creationflags=NW)
+def generate_clash_config(server_ip, socks_port):
+    """Generate Clash proxy config snippet for use with Clash Verge TUN."""
+    return f"""# Add to your Clash Verge config (Settings → Profiles → Edit)
+
+proxies:
+  - name: "NYUSH-Tunnel"
+    type: socks5
+    server: 127.0.0.1
+    port: {socks_port}
+
+# Add "NYUSH-Tunnel" to your proxy group, e.g.:
+# proxy-groups:
+#   - name: "Proxy"
+#     type: select
+#     proxies:
+#       - NYUSH-Tunnel
+#       - DIRECT
+
+# IMPORTANT: Add this rule BEFORE other rules to prevent loop:
+# rules:
+#   - IP-CIDR,{server_ip}/32,DIRECT
+#   - MATCH,NYUSH-Tunnel
+"""
 
 
 # ── GUI ──
@@ -760,7 +268,6 @@ class TunnelGUI:
         self.stop_event = threading.Event()
         self.loop = None
         self.pac_port = 10801
-        self.tun_manager = TunManager()
 
         self.root.update_idletasks()
         x = (self.root.winfo_screenwidth() - 720) // 2
@@ -805,9 +312,11 @@ class TunnelGUI:
         mode_frame.pack(fill="x", pady=6)
         self.mode_var = tk.StringVar(value="pac")
         for text, val in [("System Proxy (browser)", "pac"),
-                          ("TUN Mode (all apps, admin)", "tun"),
-                          ("SOCKS5 only", "none")]:
+                          ("SOCKS5 only (for Clash etc.)", "none")]:
             ttk.Radiobutton(mode_frame, text=text, variable=self.mode_var, value=val).pack(anchor="w")
+        self.clash_btn = ttk.Button(mode_frame, text="Copy Clash Config",
+                                     command=self._copy_clash_config, width=20)
+        self.clash_btn.pack(anchor="w", pady=(4, 0))
 
         btn_frame = ttk.Frame(left)
         btn_frame.pack(pady=8)
@@ -856,6 +365,24 @@ class TunnelGUI:
                 self.lport_var.set(lines[3])
             if len(lines) >= 5:
                 self.mode_var.set(lines[4])
+
+    def _copy_clash_config(self):
+        ip = self.ip_var.get().strip()
+        lport = self.lport_var.get().strip() or "1080"
+        if not ip:
+            messagebox.showinfo("Clash Config", "Enter VPS IP first, then connect in SOCKS5 mode.")
+            return
+        config = generate_clash_config(ip, lport)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(config)
+        self.log("Clash config copied to clipboard!")
+        self.log("Paste into Clash Verge profile, then enable TUN mode in Clash.")
+        messagebox.showinfo("Copied!",
+                            "Clash config copied to clipboard.\n\n"
+                            "1. Connect here in 'SOCKS5 only' mode\n"
+                            "2. Paste config into Clash Verge profile\n"
+                            "3. Enable TUN mode in Clash Verge\n\n"
+                            f"IMPORTANT: VPS IP {ip} is set to DIRECT to prevent loop.")
 
     def _connect(self):
         ip = self.ip_var.get().strip()
@@ -916,16 +443,10 @@ class TunnelGUI:
                             self.log("Setting system proxy (PAC)...")
                             set_proxy_pac(True, self.pac_port)
                             self.log("System proxy enabled")
-                        elif mode == "tun":
-                            self.log("Setting up TUN mode...")
-                            self.tun_manager.start(
-                                int(lport), ip,
-                                status_cb=lambda s: self.log(s))
-                            self.log("TUN mode active")
                     except Exception as e:
                         self.log(f"ERROR: {e}")
                         self.root.after(0, lambda: self._on_connect_fail(
-                            f"Proxy setup failed: {e}\n\nTUN mode requires Administrator."))
+                            f"Proxy setup failed: {e}"))
                         self.stop_event.set()
                         return
                     self.root.after(0, self._on_connected)
@@ -945,8 +466,7 @@ class TunnelGUI:
 
     def _on_connected(self):
         mode = self.mode_var.get()
-        label = {"pac": "Connected (System Proxy)", "tun": "Connected (TUN)",
-                 "none": "Connected (SOCKS5 only)"}
+        label = {"pac": "Connected (System Proxy)", "none": "Connected (SOCKS5 only)"}
         self.status_var.set(label.get(mode, "Connected"))
         self.status_label.config(foreground="green")
         self.disconnect_btn.config(state="normal")
@@ -964,9 +484,6 @@ class TunnelGUI:
         if mode == "pac":
             set_proxy_pac(False, self.pac_port)
             self.log("System proxy disabled")
-        elif mode == "tun":
-            self.tun_manager.stop()
-            self.log("TUN stopped, routes restored")
 
         self.stop_event.set()
 
@@ -988,8 +505,6 @@ class TunnelGUI:
         mode = self.mode_var.get()
         if mode == "pac":
             set_proxy_pac(False, self.pac_port)
-        elif mode == "tun":
-            self.tun_manager.stop()
         self.stop_event.set()
         if self.tunnel_thread and self.tunnel_thread.is_alive():
             self.tunnel_thread.join(timeout=2)
