@@ -504,15 +504,24 @@ class TunManager:
         """Run a command, log it, return (stdout, stderr, returncode)."""
         if status_cb:
             status_cb(f"$ {' '.join(args[:5])}")
-        r = subprocess.run(args, capture_output=True, text=True, timeout=15,
-                           creationflags=subprocess.CREATE_NO_WINDOW)
-        if r.stdout.strip() and status_cb:
-            status_cb(f"  -> {r.stdout.strip()[:100]}")
+        try:
+            r = subprocess.run(args, capture_output=True, text=True, timeout=15,
+                               creationflags=subprocess.CREATE_NO_WINDOW)
+        except Exception as e:
+            if status_cb:
+                status_cb(f"  CMD ERROR: {e}")
+            if check:
+                raise RuntimeError(f"Command failed: {' '.join(args)}\n{e}")
+            return "", str(e), 1
+        stdout = (r.stdout or "").strip()
+        stderr = (r.stderr or "").strip()
+        if stdout and status_cb:
+            status_cb(f"  -> {stdout[:100]}")
         if r.returncode != 0 and status_cb:
-            status_cb(f"  ERR({r.returncode}): {r.stderr.strip()[:100]}")
+            status_cb(f"  ERR({r.returncode}): {stderr[:100]}")
         if check and r.returncode != 0:
-            raise RuntimeError(f"Command failed: {' '.join(args)}\n{r.stderr}")
-        return r.stdout.strip(), r.stderr.strip(), r.returncode
+            raise RuntimeError(f"Command failed: {' '.join(args)}\n{stderr}")
+        return stdout, stderr, r.returncode
 
     def _find_tun_interface(self, status_cb=None):
         """Find the TUN adapter name created by tun2socks."""
