@@ -569,13 +569,26 @@ class TunManager:
                 "Cannot determine default gateway.\n"
                 "TUN mode needs the original gateway to route VPS traffic directly.")
 
-        # MUST add VPS direct route BEFORE starting TUN to prevent loop
+        # Get physical interface index for the default route
+        if status_cb:
+            status_cb("Getting physical interface index...")
+        phys_if_out, _, _ = self._run_cmd(
+            ["powershell", "-Command",
+             "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric | "
+             "Select-Object -First 1).InterfaceIndex"],
+            status_cb)
+        self._phys_if = phys_if_out.strip() if phys_if_out.strip().isdigit() else None
+        if status_cb:
+            status_cb(f"Physical IF index: {self._phys_if}")
+
+        # MUST add VPS direct route BEFORE starting TUN, bound to physical interface
         if status_cb:
             status_cb(f"Adding direct route for VPS {self.server_ip}...")
-        self._run_cmd(
-            ["route", "add", self.server_ip, "mask", "255.255.255.255",
-             self.original_gateway, "metric", "1"],
-            status_cb, check=True)
+        route_cmd = ["route", "add", self.server_ip, "mask", "255.255.255.255",
+                     self.original_gateway, "metric", "1"]
+        if self._phys_if:
+            route_cmd.extend(["if", self._phys_if])
+        self._run_cmd(route_cmd, status_cb, check=True)
 
         # Start tun2socks
         tun_dir = _tun2socks_dir()
@@ -688,9 +701,10 @@ class TunManager:
         for cidr, mask in [("10.0.0.0", "255.0.0.0"),
                            ("172.16.0.0", "255.240.0.0"),
                            ("192.168.0.0", "255.255.0.0")]:
-            self._run_cmd(
-                ["route", "add", cidr, "mask", mask, self.original_gateway, "metric", "1"],
-                status_cb)
+            lan_cmd = ["route", "add", cidr, "mask", mask, self.original_gateway, "metric", "1"]
+            if self._phys_if:
+                lan_cmd.extend(["if", self._phys_if])
+            self._run_cmd(lan_cmd, status_cb)
 
         # Set DNS on TUN interface
         if status_cb:
