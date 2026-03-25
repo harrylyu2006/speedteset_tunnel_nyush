@@ -502,8 +502,9 @@ class TunManager:
 
     def _run_cmd(self, args, status_cb=None, check=False):
         """Run a command, log it, return (stdout, stderr, returncode)."""
+        cmd_str = ' '.join(args)
         if status_cb:
-            status_cb(f"$ {' '.join(args[:5])}")
+            status_cb(f"$ {cmd_str}")
         try:
             r = subprocess.run(args, capture_output=True, text=True, timeout=15,
                                creationflags=subprocess.CREATE_NO_WINDOW)
@@ -511,16 +512,18 @@ class TunManager:
             if status_cb:
                 status_cb(f"  CMD ERROR: {e}")
             if check:
-                raise RuntimeError(f"Command failed: {' '.join(args)}\n{e}")
+                raise RuntimeError(f"Command failed: {cmd_str}\n{e}")
             return "", str(e), 1
         stdout = (r.stdout or "").strip()
         stderr = (r.stderr or "").strip()
         if stdout and status_cb:
-            status_cb(f"  -> {stdout[:100]}")
+            status_cb(f"  -> {stdout[:200]}")
+        if stderr and status_cb:
+            status_cb(f"  stderr: {stderr[:200]}")
         if r.returncode != 0 and status_cb:
-            status_cb(f"  ERR({r.returncode}): {stderr[:100]}")
+            status_cb(f"  EXIT CODE: {r.returncode}")
         if check and r.returncode != 0:
-            raise RuntimeError(f"Command failed: {' '.join(args)}\n{stderr}")
+            raise RuntimeError(f"Command failed: {cmd_str}\n{stderr}")
         return stdout, stderr, r.returncode
 
     def _find_tun_interface(self, status_cb=None):
@@ -601,23 +604,61 @@ class TunManager:
 
         # Configure TUN adapter IP
         if status_cb:
-            status_cb("Configuring TUN adapter...")
+            status_cb("Configuring TUN adapter IP...")
         self._run_cmd(
             ["netsh", "interface", "ip", "set", "address",
-             tun_name, "static", TUN_ADDR, "255.255.255.0", TUN_GATEWAY],
+             f"name={tun_name}", "source=static",
+             f"addr={TUN_ADDR}", f"mask=255.255.255.0", f"gateway={TUN_GATEWAY}"],
             status_cb)
 
-        # Route all traffic through TUN (split into two halves to override default)
+        # Verify TUN interface got the IP
+        time.sleep(1)
+        out, _, _ = self._run_cmd(
+            ["netsh", "interface", "ip", "show", "address", tun_name],
+            status_cb)
+        if TUN_ADDR not in out:
+            if status_cb:
+                status_cb(f"WARNING: TUN IP not set, trying alternative...")
+            # Alternative: use powershell
+            self._run_cmd(
+                ["powershell", "-Command",
+                 f"New-NetIPAddress -InterfaceAlias '{tun_name}' -IPAddress {TUN_ADDR} "
+                 f"-PrefixLength 24 -DefaultGateway {TUN_GATEWAY} -ErrorAction SilentlyContinue"],
+                status_cb)
+
+        # Get TUN interface index for route commands
         if status_cb:
-            status_cb("Adding routes...")
-        self._run_cmd(
-            ["route", "add", "0.0.0.0", "mask", "128.0.0.0", TUN_GATEWAY, "metric", "5"],
+            status_cb("Getting TUN interface index...")
+        idx_out, _, _ = self._run_cmd(
+            ["powershell", "-Command",
+             f"(Get-NetAdapter -Name '{tun_name}' -ErrorAction SilentlyContinue).ifIndex"],
             status_cb)
-        self._run_cmd(
-            ["route", "add", "128.0.0.0", "mask", "128.0.0.0", TUN_GATEWAY, "metric", "5"],
-            status_cb)
+        tun_if = idx_out.strip() if idx_out.strip().isdigit() else None
 
-        # Also keep local/private networks direct
+        # Route all traffic through TUN
+        if status_cb:
+            status_cb("Adding routes through TUN...")
+        if tun_if:
+            # Use interface index for precise routing
+            self._run_cmd(
+                ["route", "add", "0.0.0.0", "mask", "128.0.0.0", TUN_GATEWAY, "metric", "5",
+                 "if", tun_if],
+                status_cb)
+            self._run_cmd(
+                ["route", "add", "128.0.0.0", "mask", "128.0.0.0", TUN_GATEWAY, "metric", "5",
+                 "if", tun_if],
+                status_cb)
+        else:
+            self._run_cmd(
+                ["route", "add", "0.0.0.0", "mask", "128.0.0.0", TUN_GATEWAY, "metric", "5"],
+                status_cb)
+            self._run_cmd(
+                ["route", "add", "128.0.0.0", "mask", "128.0.0.0", TUN_GATEWAY, "metric", "5"],
+                status_cb)
+
+        # Keep local/private networks direct through original gateway
+        if status_cb:
+            status_cb("Adding LAN direct routes...")
         for cidr, mask in [("10.0.0.0", "255.0.0.0"),
                            ("172.16.0.0", "255.240.0.0"),
                            ("192.168.0.0", "255.255.0.0")]:
@@ -629,8 +670,14 @@ class TunManager:
         if status_cb:
             status_cb("Setting DNS...")
         self._run_cmd(
-            ["netsh", "interface", "ip", "set", "dns", tun_name, "static", TUN_DNS],
+            ["netsh", "interface", "ip", "set", "dns",
+             f"name={tun_name}", "source=static", f"addr={TUN_DNS}"],
             status_cb)
+
+        # Verify routes
+        if status_cb:
+            status_cb("Verifying routing table...")
+        self._run_cmd(["route", "print", "0.0.0.0"], status_cb)
 
     def stop(self):
         if sys.platform == "win32":
