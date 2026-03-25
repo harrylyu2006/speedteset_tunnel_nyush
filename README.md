@@ -54,21 +54,21 @@ curl -fsSL https://raw.githubusercontent.com/harrylyu2006/speedteset_tunnel_nyus
 
 ### Client — Windows
 
-Open PowerShell and paste:
+**Option 1: GUI (recommended, no Python needed)**
+
+Download `SpeedTestTunnel.exe` from [Releases](https://github.com/harrylyu2006/speedteset_tunnel_nyush/releases/latest), double-click to run.
+
+Two proxy modes:
+- **System Proxy** — sets PAC proxy, works for browsers
+- **SOCKS5 only** — use with Clash Verge for full TUN (all apps)
+
+For TUN mode: connect with "SOCKS5 only", click "Copy Clash Config", paste into Clash Verge profile, enable TUN in Clash.
+
+**Option 2: PowerShell script (requires Python)**
 
 ```powershell
 irm https://raw.githubusercontent.com/harrylyu2006/speedteset_tunnel_nyush/main/install_client.ps1 | iex
 ```
-
-Or with args (copy from server output):
-
-```powershell
-.\install_client.ps1 -Server 1.2.3.4 -Port 8080 -Password mypass
-```
-
-### Client — Windows EXE (GUI, no Python needed)
-
-Download the latest `SpeedTestTunnel.exe` from [Releases](https://github.com/harrylyu2006/speedteset_tunnel_nyush/releases/latest), double-click to run.
 
 ### Stop tunnel
 
@@ -76,7 +76,7 @@ Download the latest `SpeedTestTunnel.exe` from [Releases](https://github.com/har
 # macOS / Linux
 ~/.speedtest-tunnel/stop.sh
 
-# Windows (PowerShell)
+# Windows: click Disconnect in GUI, or:
 ~\.speedtest-tunnel\stop.ps1
 ```
 
@@ -86,7 +86,7 @@ Download the latest `SpeedTestTunnel.exe` from [Releases](https://github.com/har
 # macOS / Linux
 curl -fsSL https://raw.githubusercontent.com/harrylyu2006/speedteset_tunnel_nyush/main/uninstall.sh | bash
 
-# Windows (PowerShell)
+# Windows
 ~\.speedtest-tunnel\uninstall.ps1
 ```
 
@@ -96,15 +96,20 @@ curl -fsSL https://raw.githubusercontent.com/harrylyu2006/speedteset_tunnel_nyus
 
 **Server (`install_server.sh`)**:
 1. Downloads `server.py` to `/opt/speedtest-tunnel/`
-2. Prompts for tunnel password
+2. Prompts for port and password
 3. Creates systemd service (auto-start on reboot)
-4. Opens firewall port 8080
+4. Opens firewall port
 
 **Client (`install_client.sh`)**:
 1. Clones repo to `~/.speedtest-tunnel/`
-2. Prompts for VPS IP and password
+2. Prompts for VPS IP, port, and password
 3. Starts SOCKS5 proxy in background
 4. Enables system-wide proxy
+
+**Windows GUI (`SpeedTestTunnel.exe`)**:
+1. Enter server info, click Connect
+2. System Proxy mode: auto-configures Windows proxy via PAC
+3. SOCKS5 mode: for use with Clash Verge TUN (click "Copy Clash Config")
 
 ## Manual Usage
 
@@ -123,15 +128,12 @@ python3 client.py --server YOUR_VPS_IP --password "your-secret"
 | File | Where | What |
 |------|-------|------|
 | `server.py` | VPS | Tunnel server (disguised as Ookla speedtest) |
-| `client.py` | Local | SOCKS5 proxy client |
-| `client_gui.py` | Local | Windows GUI client |
+| `client.py` | Local | SOCKS5 proxy client (CLI) |
+| `client_gui.py` | Local | Windows GUI client (System Proxy + Clash config) |
 | `install_server.sh` | VPS | One-line server deploy |
 | `install_client.sh` | Local | One-line client deploy (macOS/Linux) |
-| `install_client.ps1` | Local | One-line client deploy (Windows) |
-| `build_exe.py` | Local | Build Windows EXE |
+| `install_client.ps1` | Local | One-line client deploy (Windows PowerShell) |
 | `uninstall.sh` | Both | Remove everything (client, server, proxy settings) |
-| `test_local.py` | Local | Verify DPI bypass exists on your network |
-| `test_e2e.py` | Local | End-to-end functional test |
 
 ## Manage
 
