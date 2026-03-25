@@ -592,7 +592,6 @@ class TunManager:
 
         if self.proc.poll() is not None:
             stderr = self.proc.stderr.read().decode()
-            # Clean up the VPS route we already added
             self._run_cmd(["route", "delete", self.server_ip])
             raise RuntimeError(f"tun2socks failed:\n{stderr}")
 
@@ -602,29 +601,56 @@ class TunManager:
         if status_cb:
             status_cb(f"TUN adapter: {tun_name}")
 
-        # Configure TUN adapter IP
+        # Configure TUN adapter IP — try multiple methods
         if status_cb:
             status_cb("Configuring TUN adapter IP...")
-        self._run_cmd(
-            ["netsh", "interface", "ip", "set", "address",
-             f"name={tun_name}", "source=static",
-             f"addr={TUN_ADDR}", f"mask=255.255.255.0", f"gateway={TUN_GATEWAY}"],
-            status_cb)
 
-        # Verify TUN interface got the IP
+        ip_set = False
+
+        # Method 1: PowerShell New-NetIPAddress (most reliable for Wintun)
+        if status_cb:
+            status_cb("Trying PowerShell New-NetIPAddress...")
+        # First remove any existing IP to avoid conflict
+        self._run_cmd(
+            ["powershell", "-Command",
+             f"Remove-NetIPAddress -InterfaceAlias '{tun_name}' -Confirm:$false -ErrorAction SilentlyContinue; "
+             f"Remove-NetRoute -InterfaceAlias '{tun_name}' -Confirm:$false -ErrorAction SilentlyContinue"],
+            status_cb)
+        out, err, rc = self._run_cmd(
+            ["powershell", "-Command",
+             f"New-NetIPAddress -InterfaceAlias '{tun_name}' -IPAddress {TUN_ADDR} "
+             f"-PrefixLength 24 -PolicyStore ActiveStore"],
+            status_cb)
+        if rc == 0:
+            ip_set = True
+            if status_cb:
+                status_cb("IP set via PowerShell")
+
+        # Method 2: netsh
+        if not ip_set:
+            if status_cb:
+                status_cb("Trying netsh...")
+            out, err, rc = self._run_cmd(
+                ["netsh", "interface", "ip", "set", "address",
+                 tun_name, "static", TUN_ADDR, "255.255.255.0", TUN_GATEWAY],
+                status_cb)
+            if rc == 0:
+                ip_set = True
+
+        # Verify
         time.sleep(1)
         out, _, _ = self._run_cmd(
-            ["netsh", "interface", "ip", "show", "address", tun_name],
+            ["powershell", "-Command",
+             f"Get-NetIPAddress -InterfaceAlias '{tun_name}' -ErrorAction SilentlyContinue | "
+             "Select-Object -ExpandProperty IPAddress"],
             status_cb)
-        if TUN_ADDR not in out:
+        if TUN_ADDR in out:
             if status_cb:
-                status_cb(f"WARNING: TUN IP not set, trying alternative...")
-            # Alternative: use powershell
-            self._run_cmd(
-                ["powershell", "-Command",
-                 f"New-NetIPAddress -InterfaceAlias '{tun_name}' -IPAddress {TUN_ADDR} "
-                 f"-PrefixLength 24 -DefaultGateway {TUN_GATEWAY} -ErrorAction SilentlyContinue"],
-                status_cb)
+                status_cb(f"Verified: {tun_name} has IP {TUN_ADDR}")
+        else:
+            if status_cb:
+                status_cb(f"WARNING: IP verification failed (got: {out})")
+                status_cb("Continuing anyway — routes may still work...")
 
         # Get TUN interface index for route commands
         if status_cb:
