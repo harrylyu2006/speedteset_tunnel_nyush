@@ -231,29 +231,6 @@ def set_proxy_pac(enable: bool, pac_port: int = 10801):
         pass
 
 
-def generate_clash_config(server_ip, socks_port):
-    """Generate Clash proxy config snippet for use with Clash Verge TUN."""
-    return f"""# Add to your Clash Verge config (Settings → Profiles → Edit)
-
-proxies:
-  - name: "NYUSH-Tunnel"
-    type: socks5
-    server: 127.0.0.1
-    port: {socks_port}
-
-# Add "NYUSH-Tunnel" to your proxy group, e.g.:
-# proxy-groups:
-#   - name: "Proxy"
-#     type: select
-#     proxies:
-#       - NYUSH-Tunnel
-#       - DIRECT
-
-# IMPORTANT: Add this rule BEFORE other rules to prevent loop:
-# rules:
-#   - IP-CIDR,{server_ip}/32,DIRECT
-#   - MATCH,NYUSH-Tunnel
-"""
 
 
 # ── GUI ──
@@ -312,11 +289,8 @@ class TunnelGUI:
         mode_frame.pack(fill="x", pady=6)
         self.mode_var = tk.StringVar(value="pac")
         for text, val in [("System Proxy (browser)", "pac"),
-                          ("SOCKS5 only (for Clash etc.)", "none")]:
+                          ("SOCKS5 only (for SocksCap64 etc.)", "none")]:
             ttk.Radiobutton(mode_frame, text=text, variable=self.mode_var, value=val).pack(anchor="w")
-        self.clash_btn = ttk.Button(mode_frame, text="Copy Clash Config",
-                                     command=self._copy_clash_config, width=20)
-        self.clash_btn.pack(anchor="w", pady=(4, 0))
 
         btn_frame = ttk.Frame(left)
         btn_frame.pack(pady=8)
@@ -365,24 +339,6 @@ class TunnelGUI:
                 self.lport_var.set(lines[3])
             if len(lines) >= 5:
                 self.mode_var.set(lines[4])
-
-    def _copy_clash_config(self):
-        ip = self.ip_var.get().strip()
-        lport = self.lport_var.get().strip() or "1080"
-        if not ip:
-            messagebox.showinfo("Clash Config", "Enter VPS IP first, then connect in SOCKS5 mode.")
-            return
-        config = generate_clash_config(ip, lport)
-        self.root.clipboard_clear()
-        self.root.clipboard_append(config)
-        self.log("Clash config copied to clipboard!")
-        self.log("Paste into Clash Verge profile, then enable TUN mode in Clash.")
-        messagebox.showinfo("Copied!",
-                            "Clash config copied to clipboard.\n\n"
-                            "1. Connect here in 'SOCKS5 only' mode\n"
-                            "2. Paste config into Clash Verge profile\n"
-                            "3. Enable TUN mode in Clash Verge\n\n"
-                            f"IMPORTANT: VPS IP {ip} is set to DIRECT to prevent loop.")
 
     def _connect(self):
         ip = self.ip_var.get().strip()

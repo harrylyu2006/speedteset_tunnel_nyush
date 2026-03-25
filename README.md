@@ -59,16 +59,46 @@ curl -fsSL https://raw.githubusercontent.com/harrylyu2006/speedteset_tunnel_nyus
 Download `SpeedTestTunnel.exe` from [Releases](https://github.com/harrylyu2006/speedteset_tunnel_nyush/releases/latest), double-click to run.
 
 Two proxy modes:
-- **System Proxy** — sets PAC proxy, works for browsers
-- **SOCKS5 only** — use with Clash Verge for full TUN (all apps)
-
-For TUN mode: connect with "SOCKS5 only", click "Copy Clash Config", paste into Clash Verge profile, enable TUN in Clash.
+- **System Proxy** — auto-configures Windows proxy, works for browsers
+- **SOCKS5 only** — use with [SocksCap64](https://www.sockscap64.com/) for any app (see below)
 
 **Option 2: PowerShell script (requires Python)**
 
 ```powershell
 irm https://raw.githubusercontent.com/harrylyu2006/speedteset_tunnel_nyush/main/install_client.ps1 | iex
 ```
+
+---
+
+## Using SocksCap64 for all apps (Windows)
+
+System Proxy mode only covers browsers. To route **any app** (games, Steam, Discord, etc.) through the tunnel, use [SocksCap64](https://www.sockscap64.com/):
+
+### Setup
+
+1. Download and install [SocksCap64](https://www.sockscap64.com/sockscap-64-free-download/)
+2. Open SocksCap64, click the **gear icon** (settings) in the top right
+3. Set the proxy:
+   - **Proxy address**: `127.0.0.1`
+   - **Proxy port**: `1080`
+   - **Proxy type**: `SOCKS5`
+4. Click **Save**
+
+### Add apps
+
+1. Click the **"+"** button to add a program
+2. Browse to the `.exe` of the app you want to proxy (e.g. `steam.exe`, `Discord.exe`)
+3. **Right-click** the added app → **Run** (or double-click) to launch it through the tunnel
+
+### Tips
+
+- Apps launched through SocksCap64 will use the tunnel; apps launched normally won't
+- You can drag-and-drop `.exe` files into SocksCap64
+- Create a "Games" group to organize multiple apps
+- For **Steam**: add `steam.exe`, then all games launched from Steam will also use the tunnel
+- First connect the tunnel (GUI or CLI), **then** launch apps through SocksCap64
+
+---
 
 ### Stop tunnel
 
@@ -109,7 +139,7 @@ curl -fsSL https://raw.githubusercontent.com/harrylyu2006/speedteset_tunnel_nyus
 **Windows GUI (`SpeedTestTunnel.exe`)**:
 1. Enter server info, click Connect
 2. System Proxy mode: auto-configures Windows proxy via PAC
-3. SOCKS5 mode: for use with Clash Verge TUN (click "Copy Clash Config")
+3. SOCKS5 mode: pair with SocksCap64 for per-app proxying
 
 ## Manual Usage
 
@@ -129,7 +159,7 @@ python3 client.py --server YOUR_VPS_IP --password "your-secret"
 |------|-------|------|
 | `server.py` | VPS | Tunnel server (disguised as Ookla speedtest) |
 | `client.py` | Local | SOCKS5 proxy client (CLI) |
-| `client_gui.py` | Local | Windows GUI client (System Proxy + Clash config) |
+| `client_gui.py` | Local | Windows GUI client |
 | `install_server.sh` | VPS | One-line server deploy |
 | `install_client.sh` | Local | One-line client deploy (macOS/Linux) |
 | `install_client.ps1` | Local | One-line client deploy (Windows PowerShell) |
