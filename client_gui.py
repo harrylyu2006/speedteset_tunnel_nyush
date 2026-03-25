@@ -619,12 +619,12 @@ class TunManager:
         out, err, rc = self._run_cmd(
             ["powershell", "-Command",
              f"New-NetIPAddress -InterfaceAlias '{tun_name}' -IPAddress {TUN_ADDR} "
-             f"-PrefixLength 24 -PolicyStore ActiveStore"],
+             f"-PrefixLength 24 -DefaultGateway {TUN_GATEWAY} -PolicyStore ActiveStore"],
             status_cb)
         if rc == 0:
             ip_set = True
             if status_cb:
-                status_cb("IP set via PowerShell")
+                status_cb(f"IP {TUN_ADDR} + gateway {TUN_GATEWAY} set via PowerShell")
 
         # Method 2: netsh
         if not ip_set:
