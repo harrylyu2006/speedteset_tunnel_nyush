@@ -54,19 +54,11 @@ curl -fsSL https://raw.githubusercontent.com/harrylyu2006/speedteset_tunnel_nyus
 
 ### Client — Windows
 
-**Option 1: GUI (recommended, no Python needed)**
-
-Download `SpeedTestTunnel.exe` from [Releases](https://github.com/harrylyu2006/speedteset_tunnel_nyush/releases/latest), double-click to run.
+Download `SpeedTestTunnel.exe` from [Releases](https://github.com/harrylyu2006/speedteset_tunnel_nyush/releases/latest), double-click to run. No Python needed.
 
 Two proxy modes:
 - **System Proxy** — auto-configures Windows proxy, works for browsers
 - **SOCKS5 only** — use with [SocksCap64](https://www.sockscap64.com/) for any app (see below)
-
-**Option 2: PowerShell script (requires Python)**
-
-```powershell
-irm https://raw.githubusercontent.com/harrylyu2006/speedteset_tunnel_nyush/main/install_client.ps1 | iex
-```
 
 ---
 
