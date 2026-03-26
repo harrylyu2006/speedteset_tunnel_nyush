@@ -108,7 +108,22 @@ enable_proxy_macos() {
     networksetup -setproxybypassdomains "$IFACE" \
         "*.local" "169.254/16" "127.0.0.1" "localhost" "10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16" \
         2>/dev/null || true
-    PROXY_ENABLED="macOS: ${IFACE}"
+
+    # Also set env vars for terminal/CLI tools
+    local MARKER="# speedtest-tunnel proxy"
+    local SHELL_RC="$HOME/.zshrc"
+    [ -f "$HOME/.bashrc" ] && ! [ -f "$HOME/.zshrc" ] && SHELL_RC="$HOME/.bashrc"
+    sed -i '' "/${MARKER}/d" "$SHELL_RC" 2>/dev/null || true
+    echo "export all_proxy=socks5://127.0.0.1:${LOCAL_PORT} ${MARKER}" >> "$SHELL_RC"
+    echo "export http_proxy=socks5://127.0.0.1:${LOCAL_PORT} ${MARKER}" >> "$SHELL_RC"
+    echo "export https_proxy=socks5://127.0.0.1:${LOCAL_PORT} ${MARKER}" >> "$SHELL_RC"
+    echo "export no_proxy=localhost,127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16 ${MARKER}" >> "$SHELL_RC"
+    # Apply to current session
+    export all_proxy="socks5://127.0.0.1:${LOCAL_PORT}"
+    export http_proxy="socks5://127.0.0.1:${LOCAL_PORT}"
+    export https_proxy="socks5://127.0.0.1:${LOCAL_PORT}"
+
+    PROXY_ENABLED="macOS: ${IFACE} + terminal"
 }
 
 enable_proxy_linux_gnome() {
@@ -176,6 +191,13 @@ if [[ "$OS" == "Darwin" ]]; then
         if [ "$STATE" = "Yes" ]; then
             networksetup -setsocksfirewallproxystate "$IFACE" off
             echo "[OK] Proxy disabled on ${IFACE}"
+        fi
+    done
+    # Clean terminal env vars
+    for RC in "$HOME/.zshrc" "$HOME/.bashrc"; do
+        if grep -q "speedtest-tunnel proxy" "$RC" 2>/dev/null; then
+            sed -i '' '/# speedtest-tunnel proxy/d' "$RC"
+            echo "[OK] Env proxy removed from $RC"
         fi
     done
 elif [[ "$OS" == "Linux" ]]; then
