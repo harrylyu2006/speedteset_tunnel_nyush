@@ -237,4 +237,10 @@ else
 echo "  Set SOCKS5 proxy to 127.0.0.1:${LOCAL_PORT}"
 fi
 echo "  Stop: ~/.speedtest-tunnel/stop.sh"
+if [[ "$OS" == "Darwin" ]]; then
+echo ""
+echo "  To enable proxy in this terminal session:"
+echo "    source ~/.zshrc"
+echo "  (new terminal windows will auto-apply)"
+fi
 echo ""
